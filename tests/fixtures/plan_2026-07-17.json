@@ -1,0 +1,76 @@
+{
+  "date": "2026-07-17",
+  "generated_at": "2026-07-17T08:05:00-04:00",
+  "bias": "bearish",
+  "spx_reference": 7455.0,
+  "triggers": [
+    {
+      "id": "short_bounce",
+      "side": "short",
+      "condition": {
+        "price_between": [7477.0, 7492.0],
+        "not_before": "09:30",
+        "not_after": "15:00",
+        "requires_not_filled": ["short_now"]
+      },
+      "action": {
+        "instrument": "SPX 0DTE 7450P",
+        "size_pct": 60
+      },
+      "targets": [
+        {"level": 7435.0, "scale_out_pct": 40},
+        {"level": 7415.0, "scale_out_pct": 35},
+        {"level": 7395.0, "scale_out_pct": 25}
+      ],
+      "stop": 7508.0,
+      "one_shot": true
+    },
+    {
+      "id": "short_now",
+      "side": "short",
+      "condition": {
+        "price_between": [7453.0, 7458.0],
+        "not_before": "09:30",
+        "not_after": "10:30",
+        "requires_not_filled": ["short_bounce"]
+      },
+      "action": {
+        "instrument": "SPX 0DTE 7430P",
+        "size_pct": 50
+      },
+      "targets": [
+        {"level": 7430.0, "scale_out_pct": 60},
+        {"level": 7415.0, "scale_out_pct": 40}
+      ],
+      "stop": 7478.0,
+      "one_shot": true
+    },
+    {
+      "id": "buy_capitulation",
+      "side": "long",
+      "condition": {
+        "price_between": [7405.0, 7420.0],
+        "not_before": "09:30",
+        "not_after": "14:30"
+      },
+      "action": {
+        "instrument": "SPX 0DTE 7440C",
+        "size_pct": 30
+      },
+      "targets": [
+        {"level": 7440.0, "scale_out_pct": 60},
+        {"level": 7455.0, "scale_out_pct": 40}
+      ],
+      "stop": 7390.0,
+      "one_shot": true
+    }
+  ],
+  "invalidation": {"below": 7356.0, "action": "flatten_and_halt"},
+  "flat_by": "15:30",
+  "scheduled_events": [
+    {"time": "08:30", "release": "Housing Starts + Import/Export Prices", "source_id": "finnhub:housing-starts", "replan": false},
+    {"time": "09:15", "release": "Industrial Production + Capacity Utilization", "source_id": "finnhub:industrial-production", "replan": false},
+    {"time": "10:00", "release": "Michigan Consumer Sentiment (Prelim)", "source_id": "finnhub:umich-sentiment-prelim", "replan": true}
+  ],
+  "notes": "PERFECT STORM bearish day: NFLX -9% (worst in 9mo, weak Q3 guide), SOX worst week since Mar 2025 (memory chips -4.6 to -6.5%), Iran Day 6 (first Syria strike + Qatar hit), Fed VC Jefferson hawkish (hike odds 15-22% from 10.2%), China election meddling headlines, SpaceX abort, ISRG -10.8% on a beat. Friday OPEX = deeply negative gamma, moves amplified both ways. Week: 7550 Mon -> ~7600 Tue (CPI -0.4%) -> 7455 Fri = -145pts from ATH. Must-hold 7430; break = cascade to 7408-7380; 7356 = 50DMA doomsday. Michigan 10AM (prev 48.9) is the data wildcard: miss accelerates selloff, beat = minor bounce that still gets sold. Dead-cat bounces to 7477-7492 are the A+ short. Capitulation long is low conviction, panic flush only. EXIT ALL 15:30 - weekend Iran Day 7 risk, do not hold into close. EOD scenarios: 60% close 7415-7440, 25% close 7370-7395, 15% close 7465-7485."
+}

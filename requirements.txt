@@ -1,0 +1,19 @@
+# Auth is via the operator's Claude subscription (`claude login`), driven
+# through the Claude Agent SDK. This also requires the Claude Code CLI on
+# PATH: npm install -g @anthropic-ai/claude-code
+claude-agent-sdk
+pydantic>=2
+apscheduler>=3.10
+websockets
+httpx
+aiosqlite
+discord.py
+python-dotenv
+
+# feed.py: only needed if FEED_SOURCE=moomoo (requires the Moomoo desktop
+# app + OpenD running locally; see SPEC.md's Feed section)
+moomoo-api
+
+# dev
+pytest
+pytest-asyncio

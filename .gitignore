@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+state/*.db
+state/plan_*.json
+state/HALT
+daily_plans/*.json
