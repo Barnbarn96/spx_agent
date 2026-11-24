@@ -69,6 +69,7 @@ class Orchestrator:
             daily_loss_limit_usd=config.DAILY_LOSS_LIMIT_USD,
             max_open_triggers=config.MAX_OPEN_TRIGGERS,
             entry_cutoff_et=config.ENTRY_CUTOFF_ET,
+            max_stops_per_day=config.MAX_STOPS_PER_DAY,
         )
         self.notifier = None  # built in run(), only if Discord is configured
         self.scheduler: AgentScheduler | None = None
@@ -344,8 +345,10 @@ class Orchestrator:
             )
         elif isinstance(event, TargetHit) and self.notifier:
             await self.notifier.send_target_hit(event)
-        elif isinstance(event, StopHit) and self.notifier:
-            await self.notifier.send_stop_hit(event)
+        elif isinstance(event, StopHit):
+            if self.notifier:
+                await self.notifier.send_stop_hit(event)
+            await self._record_stop(event)
         elif isinstance(event, Invalidated) and self.notifier:
             await self.notifier.send_invalidated(event)
         elif isinstance(event, FlatByReached) and self.notifier:
@@ -354,6 +357,28 @@ class Orchestrator:
             await self.notifier.send_review_required(event)
         elif isinstance(event, EngineWarning):
             pass  # journaled above; not Discord-worthy per SPEC.md's alert list
+
+    async def _record_stop(self, event: StopHit) -> None:
+        """v2: the Nth stop of the ET day (MAX_STOPS_PER_DAY) halts new entries."""
+        if self.risk.record_stop(event.tick.ts):
+            print(f"[main] {self.risk.max_stops_per_day} stops today: HALT created", file=sys.stderr)
+            if self.notifier:
+                await self.notifier.send_halt(
+                    f"{self.risk.max_stops_per_day} stops: no new entries today (state/HALT)"
+                )
+
+    async def restore_stop_count(self) -> None:
+        """Rebuild today's stop count from the journal, so a restart after
+        one stop still halts on the next. Live mode only."""
+        if self.sim:
+            return
+        now = datetime.now(ET)
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        events = await self.journal.events_since(midnight.isoformat())
+        count = sum(1 for e in events if e["type"] == "stop_hit")
+        self.risk.seed_stops(count, now)
+        if count:
+            print(f"[main] restored {count} stop(s) already hit today", file=sys.stderr)
 
     def _spawn_decide(self, event: TriggerFired) -> None:
         task = asyncio.ensure_future(self._handle_trigger_fired(event))
@@ -615,6 +640,7 @@ class Orchestrator:
             print(f"[main] no plan for {today} on disk yet — waiting for {waiting_for}", file=sys.stderr)
 
     async def run_live(self) -> None:
+        await self.restore_stop_count()
         self._load_todays_plan_if_present()
 
         callbacks = SchedulerCallbacks(

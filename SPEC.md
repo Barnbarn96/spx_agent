@@ -224,7 +224,7 @@ Events: `TriggerFired`, `TargetHit`, `StopHit`, `Invalidated`, `FlatByReached`, 
   - `--as-of HH:MM` is the screenshot's clock time, in SGT by default. A future time rolls back one day.
   - It prints what changed and `REGIME CHANGE` when SPX crosses the flip.
   - Regime: SPX below the flip is negative gamma (moves extend); above it is positive gamma (pinning). Max pain is low weight.
-- **[planned]:** Discord `!yield 4.93` and GEX image intake; an optional OCR screen reader writing `yield.json` with `source: "ocr"`.
+- **Not planned (11-24):** Discord `!yield` and GEX image intake. Discord is for alerts only; inputs go through `/intraday`. An optional OCR screen reader writing `yield.json` with `source: "ocr"` remains a later idea.
 
 ## 10. Plan installation (`tools/write_plan.py`)
 
@@ -248,22 +248,22 @@ Pipeline: the analysis is shown in chat and saved to `analyses/<date>.md`, Claud
   - the day's analysis write-up and levels table
   - the trading rules
   - recent 5-minute bars
-  - VIX
 
 ## 12. Risk (`risk.py`)
 
 `gate_execute(engine, now)` runs at the **EXECUTE tap** and blocks on:
 - the HALT file
-- the daily realized-loss limit (which auto-creates HALT). **Inert today:** nothing feeds `record_realized_pnl()` in production (V2_STATUS 1b-3).
+- the daily realized-loss limit (which auto-creates HALT). **Inert by choice:** nothing feeds `record_realized_pnl()` in production, and the operator decided on 11-24 not to report P&L.
 - max open trades (`MAX_OPEN_TRIGGERS`, 1)
 - the 15:00 ET entry cutoff
 
 `flat_by` ≤ 15:30 is enforced at plan install.
 
+**Two stops ends the day (v2):** `main.py` calls `RiskManager.record_stop()` on every `StopHit`. The count is per ET day (by the tick's time). The stop that reaches `MAX_STOPS_PER_DAY` (2) creates `state/HALT` and posts "**HALT** — 2 stops: no new entries today (state/HALT)". At startup, `run_live()` rebuilds the count from the journal's `stop_hit` events since 00:00 ET, so a restart after one stop still halts on the next. The rebuild never creates the HALT itself. If the operator deletes the HALT, a later stop doesn't re-create it (only the one that reaches the limit does).
+
+**Not in code, by decision (11-24):** VIX size tiers and the VIX > 30 wait are applied in the `/premarket` write-up and the plan's `size_pct` / `not_before`. There's no per-trade dollar cap.
+
 **[planned]:**
-- **Two stops ends the day** (HALT).
-- **Position size capped by VIX tier:** up to 30% below 20, 15-20% at 20-30, about 10% above 30. Needs a VIX input.
-- **A per-trade dollar cap.** The operator hasn't chosen the amount yet.
 - **A soft early-entry block:** the plan sets `no_entries_before`; a trigger before it shows "Early entry — override?"; the override and reason are journaled; trades are tagged early or regular.
 
 ## 13. Discord (`notify.py`)

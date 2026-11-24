@@ -33,14 +33,18 @@ class RiskManager:
         daily_loss_limit_usd: float,
         max_open_triggers: int,
         entry_cutoff_et: str = "15:00",
+        max_stops_per_day: int = 2,
     ) -> None:
         self.halt_path = Path(halt_path)
         self.daily_loss_limit_usd = daily_loss_limit_usd
         self.max_open_triggers = max_open_triggers
         self.entry_cutoff_et = entry_cutoff_et
+        self.max_stops_per_day = max_stops_per_day
 
         self._pnl_date: date_type | None = None
         self._daily_pnl_usd: float = 0.0
+        self._stops_date: date_type | None = None
+        self._stops_count: int = 0
 
     # -- HALT file --------------------------------------------------------
 
@@ -78,6 +82,34 @@ class RiskManager:
         now = now or datetime.now(ET)
         self._roll_day_if_needed(now)
         return self._daily_pnl_usd
+
+    # -- stops per day ("no re-entry after two stops") ----------------------
+
+    def _roll_stops_if_needed(self, now: datetime) -> None:
+        today = now.astimezone(ET).date()
+        if self._stops_date != today:
+            self._stops_date = today
+            self._stops_count = 0
+
+    def seed_stops(self, count: int, now: datetime) -> None:
+        """Restore today's stop count after a restart (from the journal).
+        Never creates the HALT itself: only the next stop does."""
+        self._roll_stops_if_needed(now)
+        self._stops_count = count
+
+    def record_stop(self, now: datetime) -> bool:
+        """Count a StopHit. Returns True if this stop is the one that
+        reaches the limit and created the HALT (callers alert on that)."""
+        self._roll_stops_if_needed(now)
+        self._stops_count += 1
+        if self._stops_count == self.max_stops_per_day:
+            self.create_halt(f"two stops today ({self._stops_count}); no new entries")
+            return True
+        return False
+
+    def stops_today(self, now: datetime) -> int:
+        self._roll_stops_if_needed(now)
+        return self._stops_count
 
     # -- entry cutoff / max open triggers ----------------------------------
 

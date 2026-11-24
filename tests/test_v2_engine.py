@@ -217,6 +217,9 @@ class FakeNotifier:
     async def send_stop_hit(self, event):
         self.sent.append(("stop", event.trigger_id))
 
+    async def send_halt(self, reason):
+        self.sent.append(("text", f"**HALT** — {reason}"))
+
     async def send_wait_rearmed(self, trigger, tick, decision):
         self.sent.append(("wait", trigger.id))
 

@@ -19,6 +19,8 @@ DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "")
 
 DAILY_LOSS_LIMIT_USD = float(os.environ.get("DAILY_LOSS_LIMIT_USD", "1000"))
 MAX_OPEN_TRIGGERS = int(os.environ.get("MAX_OPEN_TRIGGERS", "1"))
+# "No re-entry after two stops": the Nth StopHit of the ET day creates state/HALT
+MAX_STOPS_PER_DAY = int(os.environ.get("MAX_STOPS_PER_DAY", "2"))
 YIELD_WINDOW_MIN = int(os.environ.get("YIELD_WINDOW_MIN", "5"))
 YIELD_EPSILON = float(os.environ.get("YIELD_EPSILON", "0.005"))
 
