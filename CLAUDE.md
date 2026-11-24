@@ -46,5 +46,15 @@ The two halves only share files under `state/`:
 - Watcher: `.venv/Scripts/python.exe main.py` (in its own terminal; leave it running).
 - Plan schema: `.venv/Scripts/python.exe tools/write_plan.py --schema`; worked example: `--example` (built from the Nov 23 analysis in `tests/fixtures/`).
 
-## What the engine can't express yet (say so in plan `notes`)
-5-minute close confirmation, stall/first-touch fades, direction of approach, auto breakeven stop after TP1, early-entry override. Approximate with the nearest trigger and tell the user to confirm by eye.
+## Trigger features (see `/premarket` for how to map write-up wording)
+- **Supported:**
+  - `confirm` on a 1m/5m bar close, or dwell N seconds
+  - `approach` from_above / from_below
+  - `first_touch`
+  - target `then_stop: "breakeven"`
+  - `stop_confirm` on a bar close
+- **Still not expressible:** a "stall"/rejection pattern and the early-entry override. Approximate them and say so in `notes`.
+- **Behaviours to know:**
+  - Price already in a zone at first sight → `AlreadyInZone`, no fire.
+  - A jump straight through a zone → `ZoneSkipped`, no fire.
+  - Without a fill price, breakeven uses the fire price as the entry.

@@ -28,6 +28,35 @@ def _validate_hhmm(value: str) -> str:
 # --------------------------------------------------------------------------
 
 
+class Confirm(BaseModel):
+    """v2: how a price condition (or a stop) must be met before it counts.
+
+    - tick: any single tick (v1 behaviour, the default).
+    - close: a bar close on `timeframe` ("1m" / "5m"), e.g. "5-minute close
+      above 7,260". Bars are clock-aligned in ET and built from ticks.
+    - dwell: price stays in the zone for `seconds` after a fresh entry,
+      e.g. "hold below 7,170" (entry only, not stops).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["tick", "close", "dwell"] = "tick"
+    timeframe: Literal["1m", "5m"] | None = None
+    seconds: int | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> "Confirm":
+        if self.type == "close" and self.timeframe is None:
+            raise ValueError("confirm type 'close' needs a timeframe ('1m' or '5m')")
+        if self.type == "dwell" and (self.seconds is None or self.seconds <= 0):
+            raise ValueError("confirm type 'dwell' needs seconds > 0")
+        if self.type != "close" and self.timeframe is not None:
+            raise ValueError("timeframe only applies to confirm type 'close'")
+        if self.type != "dwell" and self.seconds is not None:
+            raise ValueError("seconds only applies to confirm type 'dwell'")
+        return self
+
+
 class Condition(BaseModel):
     """All fields optional and ANDed together."""
 
@@ -36,6 +65,16 @@ class Condition(BaseModel):
     price_between: tuple[float, float] | None = None
     price_above: float | None = None
     price_below: float | None = None
+    # v2: how the price condition must be met (default: any tick).
+    confirm: Confirm | None = None
+    # v2: only fire when price arrives from this side of a price_between
+    # zone — "buy the dip" = from_above, so a rally up into the zone from
+    # below doesn't fire.
+    approach: Literal["from_above", "from_below"] | None = None
+    # v2: only the first touch of the zone counts (e.g. "fade the first
+    # touch of resistance"). Any earlier touch today — even while a time
+    # gate was closed, or price already in the zone at startup — blocks it.
+    first_touch: bool = False
     yields_10y: Literal["falling", "rising"] | None = None
     # v2: level checks on the 10-year yield, in percent (e.g. 4.95). These
     # work with sparse manual input (state/yield.json), unlike yields_10y's
@@ -58,6 +97,13 @@ class Condition(BaseModel):
             _validate_hhmm(self.not_before)
         if self.not_after is not None:
             _validate_hhmm(self.not_after)
+        has_price = (
+            self.price_between is not None or self.price_above is not None or self.price_below is not None
+        )
+        if self.approach is not None and self.price_between is None:
+            raise ValueError("approach needs a price_between zone")
+        if (self.confirm is not None or self.first_touch) and not has_price:
+            raise ValueError("confirm / first_touch need a price condition")
         for name in ("yield_below", "yield_above"):
             value = getattr(self, name)
             if value is not None and not 0.5 <= value <= 15:
@@ -86,6 +132,9 @@ class Target(BaseModel):
 
     level: float
     scale_out_pct: float = Field(gt=0, le=100)
+    # v2: after this target is hit, move the stop to the entry price
+    # ("take half at TP1 and move the stop to breakeven").
+    then_stop: Literal["breakeven"] | None = None
 
 
 class Trigger(BaseModel):
@@ -97,7 +146,17 @@ class Trigger(BaseModel):
     action: Action
     targets: list[Target] = Field(min_length=1)
     stop: float
+    # v2: how the stop must be hit. Default: any tick (fastest exit). "close"
+    # on 1m/5m ignores single-tick wicks through the stop but exits later in
+    # a real move. Dwell is not allowed for stops.
+    stop_confirm: Confirm | None = None
     one_shot: bool = True
+
+    @model_validator(mode="after")
+    def _check_stop_confirm(self) -> "Trigger":
+        if self.stop_confirm is not None and self.stop_confirm.type == "dwell":
+            raise ValueError(f"trigger {self.id!r}: stop_confirm can be 'tick' or 'close', not 'dwell'")
+        return self
 
     @model_validator(mode="after")
     def _check_targets_sum(self) -> "Trigger":
@@ -303,6 +362,20 @@ class AlreadyInZone(BaseModel):
     tick: Tick
 
 
+class StopMoved(BaseModel):
+    """v2: a target with then_stop="breakeven" was hit, so the trigger's
+    stop moved to its entry price."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["stop_moved"] = "stop_moved"
+    trigger_id: str
+    old_stop: float
+    new_stop: float
+    reason: str
+    tick: Tick
+
+
 class ZoneSkipped(BaseModel):
     """v2: price moved clean across a trigger's price_between zone between
     two ticks without printing inside it. The trigger does NOT fire — the
@@ -336,5 +409,6 @@ EngineEvent = Union[
     ReviewRequired,
     AlreadyInZone,
     ZoneSkipped,
+    StopMoved,
     EngineWarning,
 ]

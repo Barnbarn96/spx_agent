@@ -22,6 +22,7 @@ from schema import (
     Plan,
     ReviewRequired,
     StopHit,
+    StopMoved,
     TargetHit,
     Tick,
     Trigger,
@@ -34,6 +35,9 @@ ET = ZoneInfo("America/New_York")
 DEFAULT_YIELD_WINDOW_MIN = 5
 DEFAULT_YIELD_EPSILON = 0.005
 DEFAULT_WAIT_COOLDOWN_SEC = 300
+
+# v2: bar timeframes the engine builds from ticks, in minutes
+_TIMEFRAMES = {"1m": 1, "5m": 5}
 
 
 class TriggerStatus(str, Enum):
@@ -78,6 +82,23 @@ class TriggerState:
     # first evaluation never fires on price already inside the zone (startup,
     # new plan, replan) — it emits AlreadyInZone instead.
     observed: bool = False
+    # v2 first_touch: entries into the zone today (tick prices, gates ignored)
+    touches: int = 0
+    in_zone_last_tick: bool | None = None
+    # v2 confirm "close": the last bar close evaluated for this trigger
+    last_close: float | None = None
+    # v2 confirm "dwell": when the current stay in the zone began
+    zone_since: datetime | None = None
+    # v2: price at the tick that fired, and the entry price once filled
+    # (the operator's fill if given, else the fire price)
+    fire_price: float | None = None
+    entry_price: float | None = None
+    # v2: stop moved by a then_stop target (breakeven); None = trigger.stop
+    stop_override: float | None = None
+
+    @property
+    def stop(self) -> float:
+        return self.stop_override if self.stop_override is not None else self.trigger.stop
 
 
 class TriggerEngine:
@@ -99,6 +120,11 @@ class TriggerEngine:
         self._yield_ticks: deque[tuple[datetime, float]] = deque()
         self._flat_by_reached = False
         self._pending_events: list[EngineEvent] = []
+        # v2 bars: current bucket and last price per timeframe, and the
+        # close produced on the current tick (None if no bar closed)
+        self._bar_bucket: dict[str, tuple] = {}
+        self._bar_last: dict[str, float] = {}
+        self._closed: dict[str, float | None] = {}
 
     # -- operator actions ---------------------------------------------
 
@@ -112,10 +138,14 @@ class TriggerEngine:
         if state.status == TriggerStatus.FIRED:
             state.status = TriggerStatus.SKIPPED
 
-    def mark_filled(self, trigger_id: str) -> None:
+    def mark_filled(self, trigger_id: str, fill_price: float | None = None) -> None:
+        """Position opened. fill_price is the SPX level the operator got in
+        at; without it the fire price stands in as the entry (used by
+        then_stop="breakeven")."""
         state = self.states[trigger_id]
         if state.status == TriggerStatus.CONFIRMED:
             state.status = TriggerStatus.OPEN
+            state.entry_price = fill_price if fill_price is not None else state.fire_price
 
     def wait(
         self, trigger_id: str, tick: Tick, cooldown_sec: int = DEFAULT_WAIT_COOLDOWN_SEC
@@ -193,6 +223,13 @@ class TriggerEngine:
                     "cooldown_until": s.cooldown_until.isoformat() if s.cooldown_until else None,
                     "warned_no_yield": s.warned_no_yield,
                     "observed": s.observed,
+                    "touches": s.touches,
+                    "in_zone_last_tick": s.in_zone_last_tick,
+                    "last_close": s.last_close,
+                    "zone_since": s.zone_since.isoformat() if s.zone_since else None,
+                    "fire_price": s.fire_price,
+                    "entry_price": s.entry_price,
+                    "stop_override": s.stop_override,
                 }
                 for tid, s in self.states.items()
             },
@@ -225,6 +262,14 @@ class TriggerEngine:
             state.cooldown_until = datetime.fromisoformat(cooldown) if cooldown else None
             state.warned_no_yield = bool(saved.get("warned_no_yield", False))
             state.observed = bool(saved.get("observed", False))
+            state.touches = int(saved.get("touches", 0))
+            state.in_zone_last_tick = saved.get("in_zone_last_tick")
+            state.last_close = saved.get("last_close")
+            since = saved.get("zone_since")
+            state.zone_since = datetime.fromisoformat(since) if since else None
+            state.fire_price = saved.get("fire_price")
+            state.entry_price = saved.get("entry_price")
+            state.stop_override = saved.get("stop_override")
             restored.append(tid)
         return restored
 
@@ -233,6 +278,7 @@ class TriggerEngine:
     def evaluate(self, tick: Tick) -> list[EngineEvent]:
         events: list[EngineEvent] = list(self._pending_events)
         self._pending_events.clear()
+        self._update_bars(tick)
 
         if tick.yield_10y is not None:
             self._yield_ticks.append((tick.ts, tick.yield_10y))
@@ -333,12 +379,40 @@ class TriggerEngine:
         trigger = state.trigger
         cond = trigger.condition
         now_et = tick.ts.astimezone(ET)
+        has_price = self._has_price_condition(trigger)
+        mode = cond.confirm.type if cond.confirm is not None else "tick"
 
         # Recorded before any gate, so a trigger first seen while a
         # not_before/yield gate blocks it can still fire when the gate opens
         # with price inside the zone — that's a real "conditions now met".
         first_observation = not state.observed
         state.observed = True
+
+        # v2: bookkeeping that must see every tick, gated or not.
+        candidate = True
+        if has_price:
+            self._track_touches(state, tick, first_observation)
+            if mode == "close":
+                candidate = self._close_candidate(state, tick, events, first_observation)
+            elif mode == "dwell":
+                candidate = self._dwell_candidate(state, tick, events, first_observation)
+
+        if not self._gates_open(state, tick, now_et, events):
+            return False
+
+        if has_price and mode == "tick":
+            candidate = self._tick_candidate(state, tick, events, first_observation)
+
+        if candidate and cond.first_touch and state.touches > 1:
+            return False  # an earlier touch today already used up "first touch"
+        return candidate
+
+    def _gates_open(
+        self, state: TriggerState, tick: Tick, now_et: datetime, events: list[EngineEvent]
+    ) -> bool:
+        """Time, requires_not_filled and yield conditions."""
+        trigger = state.trigger
+        cond = trigger.condition
 
         if cond.not_before is not None:
             if now_et < _hhmm_on_date(cond.not_before, tick.ts):
@@ -394,34 +468,115 @@ class TriggerEngine:
                 return False
             if cond.yield_above is not None and not y >= cond.yield_above:
                 return False
-
-        if self._has_price_condition(trigger):
-            in_zone = self._in_zone(trigger, tick.price)
-            was_in_zone = state.was_in_zone
-            state.was_in_zone = in_zone
-            if not in_zone:
-                # v2: a fast move can carry price clean across a narrow
-                # price_between zone between two ticks. Don't fire — price
-                # is now outside the planned entry zone (firing would chase,
-                # e.g. a data spike up through a buy-the-dip zone) — but tell
-                # the operator. A later move back into the zone still fires,
-                # since was_in_zone is now False.
-                if not first_observation and self._jumped_through_zone(trigger, tick):
-                    events.append(
-                        ZoneSkipped(trigger_id=trigger.id, from_price=self.prev_tick.price, tick=tick)
-                    )
-                return False
-            if was_in_zone:
-                # already inside on the previous tick -> debounced, no refire
-                return False
-            if first_observation:
-                # v2: price was already inside the zone the first time the
-                # engine saw this trigger. Don't fire on a setup that may
-                # be half over; wait for a fresh entry, but say so.
-                events.append(AlreadyInZone(trigger_id=trigger.id, tick=tick))
-                return False
-
         return True
+
+    # -- price-condition modes (v2) ------------------------------------
+
+    def _approach_ok(self, trigger: Trigger, prev_price: float | None) -> bool:
+        """Direction of approach for a price_between zone: where price was
+        just before it entered."""
+        approach = trigger.condition.approach
+        if approach is None:
+            return True
+        if prev_price is None:
+            return False
+        low, high = trigger.condition.price_between
+        return prev_price > high if approach == "from_above" else prev_price < low
+
+    def _track_touches(self, state: TriggerState, tick: Tick, first_observation: bool) -> None:
+        """Count entries into the zone (tick prices, ignoring gates) for
+        first_touch. Already inside at first sight counts as a touch, and so
+        does a jump clean through the zone."""
+        in_now = self._in_zone(state.trigger, tick.price)
+        if in_now and (first_observation or not state.in_zone_last_tick):
+            state.touches += 1
+        elif not in_now and not first_observation and self._jumped_through_zone(state.trigger, tick):
+            state.touches += 1
+        state.in_zone_last_tick = in_now
+
+    def _tick_candidate(
+        self, state: TriggerState, tick: Tick, events: list[EngineEvent], first_observation: bool
+    ) -> bool:
+        """v1 behaviour: any tick entering the zone, debounced, plus the v2
+        first-sight, zone-skipped and approach rules."""
+        trigger = state.trigger
+        in_zone = self._in_zone(trigger, tick.price)
+        was_in_zone = state.was_in_zone
+        state.was_in_zone = in_zone
+        if not in_zone:
+            # v2: a fast move can carry price clean across a narrow
+            # price_between zone between two ticks. Don't fire — price
+            # is now outside the planned entry zone (firing would chase,
+            # e.g. a data spike up through a buy-the-dip zone) — but tell
+            # the operator. A later move back into the zone still fires,
+            # since was_in_zone is now False.
+            if not first_observation and self._jumped_through_zone(trigger, tick):
+                events.append(
+                    ZoneSkipped(trigger_id=trigger.id, from_price=self.prev_tick.price, tick=tick)
+                )
+            return False
+        if was_in_zone:
+            # already inside on the previous tick -> debounced, no refire
+            return False
+        if first_observation:
+            # v2: price was already inside the zone the first time the
+            # engine saw this trigger. Don't fire on a setup that may
+            # be half over; wait for a fresh entry, but say so.
+            events.append(AlreadyInZone(trigger_id=trigger.id, tick=tick))
+            return False
+        prev_price = self.prev_tick.price if self.prev_tick is not None else None
+        return self._approach_ok(trigger, prev_price)
+
+    def _close_candidate(
+        self, state: TriggerState, tick: Tick, events: list[EngineEvent], first_observation: bool
+    ) -> bool:
+        """confirm.type == "close": the zone is judged on bar closes. Fires
+        on the first close inside the zone after a close (or the first-sight
+        price) outside it. Tracked on every bar, gated or not, so a breakout
+        that happened while a time gate was closed isn't fired late."""
+        trigger = state.trigger
+        if first_observation:
+            state.was_in_zone = self._in_zone(trigger, tick.price)
+            state.last_close = None
+            if state.was_in_zone:
+                events.append(AlreadyInZone(trigger_id=trigger.id, tick=tick))
+            return False
+        close = self._closed.get(trigger.condition.confirm.timeframe)
+        if close is None:
+            return False  # no bar closed on this tick
+        in_zone = self._in_zone(trigger, close)
+        was_in_zone = state.was_in_zone
+        prev_close = state.last_close
+        state.was_in_zone = in_zone
+        state.last_close = close
+        if not in_zone or was_in_zone:
+            return False
+        return self._approach_ok(trigger, prev_close)
+
+    def _dwell_candidate(
+        self, state: TriggerState, tick: Tick, events: list[EngineEvent], first_observation: bool
+    ) -> bool:
+        """confirm.type == "dwell": price must stay in the zone for
+        confirm.seconds after a fresh entry (e.g. "hold below 7,170"). The
+        clock runs whether or not a gate is open; the trigger fires on the
+        first tick, with gates open, once the dwell is satisfied."""
+        trigger = state.trigger
+        in_zone = self._in_zone(trigger, tick.price)
+        was_in_zone = state.was_in_zone
+        state.was_in_zone = in_zone
+        if not in_zone:
+            state.zone_since = None
+            return False
+        if first_observation:
+            events.append(AlreadyInZone(trigger_id=trigger.id, tick=tick))
+            return False
+        if not was_in_zone:
+            prev_price = self.prev_tick.price if self.prev_tick is not None else None
+            # a fresh entry starts the clock, if it came from the right side
+            state.zone_since = tick.ts if self._approach_ok(trigger, prev_price) else None
+        if state.zone_since is None:
+            return False
+        return (tick.ts - state.zone_since).total_seconds() >= trigger.condition.confirm.seconds
 
     def _jumped_through_zone(self, trigger: Trigger, tick: Tick) -> bool:
         between = trigger.condition.price_between
@@ -432,6 +587,21 @@ class TriggerEngine:
         return (prev.price > high and tick.price < low) or (
             prev.price < low and tick.price > high
         )
+
+    # -- bars (v2) -------------------------------------------------------
+
+    def _update_bars(self, tick: Tick) -> None:
+        """Clock-aligned 1m/5m bars in ET, built from ticks. Sets
+        self._closed[tf] to the previous bar's close on the first tick of a
+        new bar (None otherwise). A bar closes when the next bar's first
+        tick arrives, so sparse ticks delay a close, never invent one."""
+        local = tick.ts.astimezone(ET)
+        for tf, minutes in _TIMEFRAMES.items():
+            bucket = (local.date(), local.hour, local.minute - local.minute % minutes)
+            current = self._bar_bucket.get(tf)
+            self._closed[tf] = self._bar_last[tf] if current is not None and bucket != current else None
+            self._bar_bucket[tf] = bucket
+            self._bar_last[tf] = tick.price
 
     def _evaluate_armed(
         self, state: TriggerState, tick: Tick, events: list[EngineEvent]
@@ -451,13 +621,23 @@ class TriggerEngine:
 
         if self._condition_met(state, tick, events):
             state.status = TriggerStatus.FIRED
+            state.fire_price = tick.price
             return TriggerFired(trigger_id=trigger.id, tick=tick)
         return None
 
     def _check_stop(self, state: TriggerState, tick: Tick) -> StopHit | None:
         trigger = state.trigger
         prev = self.prev_tick
-        stop = trigger.stop
+        stop = state.stop  # v2: a breakeven move overrides trigger.stop
+        confirm = trigger.stop_confirm
+        if confirm is not None and confirm.type == "close":
+            # v2: judged on bar closes only — a wick through the stop inside
+            # the bar doesn't count, a close beyond it does.
+            close = self._closed.get(confirm.timeframe)
+            if close is None:
+                return None
+            beyond = close <= stop if trigger.side == "long" else close >= stop
+            return StopHit(trigger_id=trigger.id, tick=tick) if beyond else None
         if trigger.side == "long":
             crossed = tick.price <= stop and (prev is None or prev.price > stop)
         else:
@@ -498,6 +678,41 @@ class TriggerEngine:
                         tick=tick,
                     )
                 )
+                if target.then_stop == "breakeven":
+                    self._move_stop_to_breakeven(state, target, tick, events)
 
         if len(state.targets_hit) == len(trigger.targets):
             state.status = TriggerStatus.CLOSED
+
+    def _move_stop_to_breakeven(
+        self, state: TriggerState, target, tick: Tick, events: list[EngineEvent]
+    ) -> None:
+        """v2: then_stop="breakeven" — move the stop to the entry price, but
+        only ever in the protective direction (never widen it)."""
+        entry = state.entry_price
+        if entry is None:
+            events.append(
+                EngineWarning(
+                    message=(
+                        f"trigger {state.trigger.id!r}: target {target.level:g} asks for a "
+                        f"breakeven stop but no entry price is known; stop left at {state.stop:g}"
+                    ),
+                    trigger_id=state.trigger.id,
+                    tick=tick,
+                )
+            )
+            return
+        old = state.stop
+        tighter = entry > old if state.trigger.side == "long" else entry < old
+        if not tighter:
+            return
+        state.stop_override = entry
+        events.append(
+            StopMoved(
+                trigger_id=state.trigger.id,
+                old_stop=old,
+                new_stop=entry,
+                reason=f"target {target.level:g} hit: stop to breakeven",
+                tick=tick,
+            )
+        )

@@ -10,14 +10,28 @@
       "id": "buy_dip",
       "side": "long",
       "condition": {
-        "price_between": [7195.0, 7215.0],
+        "price_between": [
+          7195.0,
+          7215.0
+        ],
         "not_before": "10:00",
-        "not_after": "15:00"
+        "not_after": "15:00",
+        "approach": "from_above"
       },
-      "action": {"instrument": "SPX 0DTE call", "size_pct": 15},
+      "action": {
+        "instrument": "SPX 0DTE call",
+        "size_pct": 15
+      },
       "targets": [
-        {"level": 7250.0, "scale_out_pct": 50},
-        {"level": 7288.0, "scale_out_pct": 50}
+        {
+          "level": 7250.0,
+          "scale_out_pct": 50,
+          "then_stop": "breakeven"
+        },
+        {
+          "level": 7288.0,
+          "scale_out_pct": 50
+        }
       ],
       "stop": 7172.0,
       "one_shot": true
@@ -29,12 +43,28 @@
         "price_above": 7260.0,
         "not_before": "10:00",
         "not_after": "15:00",
-        "requires_not_filled": ["buy_dip"]
+        "requires_not_filled": [
+          "buy_dip"
+        ],
+        "confirm": {
+          "type": "close",
+          "timeframe": "5m"
+        }
       },
-      "action": {"instrument": "SPX 0DTE call", "size_pct": 10},
+      "action": {
+        "instrument": "SPX 0DTE call",
+        "size_pct": 10
+      },
       "targets": [
-        {"level": 7288.0, "scale_out_pct": 50},
-        {"level": 7324.0, "scale_out_pct": 50}
+        {
+          "level": 7288.0,
+          "scale_out_pct": 50,
+          "then_stop": "breakeven"
+        },
+        {
+          "level": 7324.0,
+          "scale_out_pct": 50
+        }
       ],
       "stop": 7238.0,
       "one_shot": true
@@ -46,10 +76,21 @@
         "price_above": 7288.0,
         "not_before": "10:00",
         "not_after": "15:00",
-        "requires_not_filled": ["breakout_long"]
+        "requires_not_filled": [
+          "breakout_long"
+        ],
+        "first_touch": true
       },
-      "action": {"instrument": "SPX 0DTE put", "size_pct": 10},
-      "targets": [{"level": 7250.0, "scale_out_pct": 100}],
+      "action": {
+        "instrument": "SPX 0DTE put",
+        "size_pct": 10
+      },
+      "targets": [
+        {
+          "level": 7250.0,
+          "scale_out_pct": 100
+        }
+      ],
       "stop": 7302.0,
       "one_shot": true
     },
@@ -60,19 +101,38 @@
         "price_below": 7170.0,
         "not_before": "10:00",
         "not_after": "15:00",
-        "requires_not_filled": ["buy_dip"]
+        "requires_not_filled": [
+          "buy_dip"
+        ],
+        "confirm": {
+          "type": "dwell",
+          "seconds": 300
+        }
       },
-      "action": {"instrument": "SPX 0DTE put", "size_pct": 10},
+      "action": {
+        "instrument": "SPX 0DTE put",
+        "size_pct": 10
+      },
       "targets": [
-        {"level": 7150.0, "scale_out_pct": 50},
-        {"level": 7100.0, "scale_out_pct": 50}
+        {
+          "level": 7150.0,
+          "scale_out_pct": 50,
+          "then_stop": "breakeven"
+        },
+        {
+          "level": 7100.0,
+          "scale_out_pct": 50
+        }
       ],
       "stop": 7190.0,
       "one_shot": true
     }
   ],
-  "invalidation": {"below": 7100.0, "action": "gap fully fading — stand aside, no new entries"},
+  "invalidation": {
+    "below": 7100.0,
+    "action": "gap fully fading - stand aside, no new entries"
+  },
   "flat_by": "15:30",
   "scheduled_events": [],
-  "notes": "Cautiously bullish after the Huang reinstatement gap. Must-hold 7150, resistance 7250 then 7288. Breakout should be a 5-minute close above 7260 and the 7288 fade needs a stall — v2 engine can't express either yet, so confirm by eye. Take half at TP1 and move the stop to breakeven by hand."
+  "notes": "Cautiously bullish after the Huang reinstatement gap. Must-hold 7150, resistance 7250 then 7288. Breakout needs a 5-minute close above 7260; breakdown needs price to hold below 7170 for 5 minutes. The 7288 fade is first touch only, and the stall itself must be confirmed by eye."
 }

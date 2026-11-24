@@ -143,14 +143,25 @@ def main(argv: list[str] | None = None) -> int:
             else "(no price condition)"
         )
         extra = []
+        if c.confirm is not None and c.confirm.type == "close":
+            extra.append(f"on {c.confirm.timeframe} close")
+        if c.confirm is not None and c.confirm.type == "dwell":
+            extra.append(f"after holding {c.confirm.seconds}s")
+        if c.approach:
+            extra.append(c.approach.replace("_", " "))
+        if c.first_touch:
+            extra.append("first touch only")
         if c.not_before:
             extra.append(f"not before {c.not_before}")
         if c.yield_below is not None:
             extra.append(f"10Y <= {c.yield_below:g}")
         if c.yield_above is not None:
             extra.append(f"10Y >= {c.yield_above:g}")
-        targets = "/".join(f"{tg.level:g}" for tg in t.targets)
-        print(f"  {t.id}: {t.side} {zone} stop {t.stop:g} targets {targets} size {t.action.size_pct:g}%"
+        targets = "/".join(
+            f"{tg.level:g}" + ("(then stop to BE)" if tg.then_stop == "breakeven" else "") for tg in t.targets
+        )
+        stop = f"{t.stop:g}" + (f" on {t.stop_confirm.timeframe} close" if t.stop_confirm and t.stop_confirm.type == "close" else "")
+        print(f"  {t.id}: {t.side} {zone} stop {stop} targets {targets} size {t.action.size_pct:g}%"
               + (f" ({', '.join(extra)})" if extra else ""))
     if old_plan is not None:
         dropped = sorted({t.id for t in old_plan.triggers} - {t.id for t in plan.triggers})

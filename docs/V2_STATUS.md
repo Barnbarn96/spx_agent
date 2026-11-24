@@ -2,9 +2,9 @@
 
 **Read this first if you are picking up `release-v2`.** It records where the build stopped, what's decided, what's still open, and what to do next, in order. [SPEC.md](../SPEC.md) is the contract. This file is the to-do list and the decision log.
 
-- **Last updated:** 2026-11-24 (milestone 1 committed as `fd68343`; engine fixes A1, A2, A7, A8 done after it, check `git status` / `git log`)
+- **Last updated:** 2026-11-24 (milestone 1 committed as `fd68343`; engine fixes A1-A8 done after it, check `git status` / `git log`)
 - **Branch:** `release-v2`, cut from `release-v1` at `f867349`.
-- **Tests:** 106 passing (`.venv/Scripts/python.exe -m pytest -q`).
+- **Tests:** 130 passing (`.venv/Scripts/python.exe -m pytest -q`).
 - **Live verification of v2: none yet.** Everything below "done" is unit-tested only.
 
 Keep this file current: tick items off, add decisions with dates, and move anything finished into "Done".
@@ -28,6 +28,10 @@ Keep this file current: tick items off, add decisions with dates, and move anyth
 | 11-24 | **A jump straight through an entry zone alerts (`ZoneSkipped`) but does NOT fire.** | The first version fired. The 07-01 ISM replay showed it chasing the 7464→7480 spike through a 7465-7472 dip zone instead of waiting for the 7468 pullback. Firing outside the planned zone also breaks "models never originate numbers". |
 | 11-24 | **Price already in a zone at first sight (startup, new plan, replan) does not fire (`AlreadyInZone`).** A gate opening with price in the zone still fires. | Don't enter a setup that may be half over. A not_before or yield gate opening is a real "conditions now met". |
 | 11-24 | **On restart, restored FIRED triggers are re-armed** (a fresh entry is needed), and Discord is told. | Their alert may never have been sent, and the old buttons no longer apply. |
+| 11-24 | **Close-confirmed triggers track closes through closed time gates.** A close-through before `not_before` isn't fired at the gate; a fresh one is needed. The dwell clock also runs through gates, and the trigger fires once the gate opens. | "5-min close above 7,260 after the 30-min wait": if it broke out at 9:45, entering at 10:00 is chasing. A sustained hold is still a hold. |
+| 11-24 | **`first_touch` counts touches that happen while a gate is closed, and price already in the zone at startup.** | The rule is "fade the *first* touch". A touch during the opening wait is still the first touch. |
+| 11-24 | **Stops default to any tick; `stop_confirm: close` is opt-in per trigger.** | The fastest exit is the safe default for 0DTE. Close-confirmed stops avoid wicks but exit later and have no hard backstop yet. |
+| 11-24 | **Breakeven uses the fire price as the entry until the Discord fill-price prompt (C1) exists.** It only ever tightens the stop. | No fill price is captured yet. |
 
 ## 2. Done (milestone 1)
 
@@ -78,6 +82,25 @@ Keep this file current: tick items off, add decisions with dates, and move anyth
   - Discord buttons for a trigger no longer in the expected state reply "Ignored …" instead of falsely saying "confirmed".
 - Tests: `tests/test_v2_engine.py` (16), plus one in `test_notify.py`.
 
+### Trigger types (after the engine fixes)
+- **A3 confirmation:**
+  - `Confirm {tick | close (1m/5m) | dwell (seconds)}` on `Condition.confirm`, and `Trigger.stop_confirm` (tick or close)
+  - engine bar builder `_update_bars`
+  - `_close_candidate` / `_dwell_candidate`
+- **A4 approach:** `Condition.approach` (from_above / from_below, needs `price_between`).
+- **A5 first touch:** `Condition.first_touch`, with `TriggerState.touches` counted ignoring gates.
+- **A6 breakeven:**
+  - `Target.then_stop="breakeven"` and the `StopMoved` event (Discord: "STOP MOVED")
+  - `mark_filled(trigger_id, fill_price=None)`; the entry is the fill price or the fire price
+  - `TriggerState.stop` property (override, else `trigger.stop`)
+- **Restructure:** `_condition_met` now does its bookkeeping first (touches, close tracking, dwell clock), then `_gates_open`, then picks the tick, close or dwell candidate. Tick-mode behaviour is unchanged (07-01 replay is identical).
+- **Plan tooling:**
+  - `tools/write_plan.py` prints the new features
+  - `plan_v2_example.json` uses all of them
+  - `/premarket` maps write-up wording to fields
+  - CLAUDE.md's feature list is updated
+- Tests: `tests/test_v2_trigger_types.py` (24).
+
 ## 3. Open decisions, waiting on the operator
 
 1. **Cleanup of unneeded v1 code.** Proposed, not yet approved. Don't delete until the operator says so.
@@ -98,10 +121,10 @@ Each item lists what "done" means. Write tests first for engine changes (replay-
 ### A. Engine correctness (highest priority, affects real money)
 1. ~~**Fast move through a whole zone.** (Built as alert-only `ZoneSkipped`, not a fire; see the decision log.) Treat the previous tick on one side and the current tick on the other side of `price_between` as entering it. *Done when:* a 7,220→7,190 jump fires `buy_dip [7195, 7215]`.~~ **Done 11-24** (see §2).
 2. ~~**No fire on startup inside a zone.** The first tick after start or (re)arm only records `was_in_zone`, unless the plan opts in. *Done when:* starting with price inside a zone doesn't fire until price leaves and re-enters.~~ **Done 11-24** (see §2).
-3. **Confirmation modes.** `Condition.confirm {type: tick | close | dwell, timeframe, seconds}`. Needs a bar builder (1m/5m) in the engine or `main.py`. Stops get their own optional confirmation (default stricter than one tick, configurable). *Done when:* "5-min close above 7,260" is expressible, and a single-tick wick doesn't fire it.
-4. **Direction of approach.** `approach: from_above | from_below`.
-5. **First-touch / stall fade.** `first_touch: true` fires only on the first touch of the session.
-6. **Take half at TP1 → breakeven stop.** `Target.then_stop: "breakeven"` moves the trigger's stop to the entry price after that target. Needs a recorded entry price (see C1).
+3. ~~**Confirmation modes.** `Condition.confirm {type: tick | close | dwell, timeframe, seconds}`. Needs a bar builder (1m/5m) in the engine or `main.py`. Stops get their own optional confirmation (default stricter than one tick, configurable). *Done when:* "5-min close above 7,260" is expressible, and a single-tick wick doesn't fire it.~~ **Done 11-24** (see §2).
+4. ~~**Direction of approach.** `approach: from_above | from_below`.~~ **Done 11-24** (see §2).
+5. ~~**First-touch / stall fade.** `first_touch: true` fires only on the first touch of the session.~~ **Done 11-24** (see §2).
+6. ~~**Take half at TP1 → breakeven stop.** `Target.then_stop: "breakeven"` moves the trigger's stop to the entry price after that target. Needs a recorded entry price (see C1).~~ **Done 11-24** (see §2).
 7. ~~**`decide()` off the tick loop.** Run it as an `asyncio` task in `main.py`. *Done when:* a 30 s `decide()` doesn't delay stop evaluation on another OPEN trigger (test with a slow fake `decide`).~~ **Done 11-24** (see §2).
 8. ~~**Save engine state** (trigger statuses, targets hit, entry and fill prices) to `state/engine_<date>.json` on every change, and restore it on startup. *Done when:* restarting `main.py` mid-trade keeps the trade OPEN with its stop.~~ **Done 11-24** (see §2).
 

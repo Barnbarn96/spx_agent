@@ -42,6 +42,7 @@ from schema import (
     ReviewRequired,
     ScheduledEvent,
     StopHit,
+    StopMoved,
     TargetHit,
     Tick,
     TriggerFired,
@@ -335,6 +336,11 @@ class Orchestrator:
                 f"`{event.trigger_id}`: SPX jumped {event.from_price:.2f} -> {event.tick.price:.2f}, "
                 f"straight through the {low:g}-{high:g} entry zone without trading in it. "
                 f"Not firing outside the zone; it will alert if price comes back into it."
+            )
+        elif isinstance(event, StopMoved) and self.notifier:
+            await self.notifier.send_text(
+                f"**STOP MOVED** `{event.trigger_id}`: {event.old_stop:g} -> {event.new_stop:g} "
+                f"({event.reason}). Move your stop order to match."
             )
         elif isinstance(event, TargetHit) and self.notifier:
             await self.notifier.send_target_hit(event)

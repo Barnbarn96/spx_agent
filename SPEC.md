@@ -115,12 +115,14 @@ See `python tools/write_plan.py --schema`, and `--example` for a worked plan bui
   - `yields_10y` (falling | rising; v1, needs a live yield stream, slated for removal)
   - time: `not_before`, `not_after`
   - `requires_not_filled[]`
-- **[planned] new condition fields:**
-  - `confirm {type: tick | close | dwell, timeframe: 1m | 5m, seconds?}`
-  - `approach: from_above | from_below`
-  - `first_touch: bool`
-  - target `then_stop: breakeven`
-  - plan-level `no_entries_before`
+- **v2 condition fields:**
+  - `confirm {type: tick | close | dwell, timeframe: 1m | 5m (close only), seconds (dwell only)}`. Default: tick.
+  - `approach: from_above | from_below`, which needs `price_between`.
+  - `first_touch: bool`. `confirm` and `first_touch` need a price condition.
+- **v2 trigger and target fields:**
+  - `Trigger.stop_confirm` (tick or close only; default tick)
+  - `Target.then_stop: "breakeven"`
+- **[planned]:** plan-level `no_entries_before`.
 
 ## 6. Trigger engine (`triggers.py`)
 
@@ -143,11 +145,24 @@ Events: `TriggerFired`, `TargetHit`, `StopHit`, `Invalidated`, `FlatByReached`, 
 
 - **Persistence (v2):** `to_snapshot()` / `restore_snapshot()` save and restore per-trigger status, debounce and first-sight flags, targets hit, cooldowns, and the invalidation and flat-by flags. A snapshot from another plan date is ignored. An in-flight trigger missing from the current plan is restored from its saved definition.
 
-**[planned] (see V2_STATUS):**
-- confirmation modes instead of single-tick triggering
-- direction of approach
-- first-touch fades
-- breakeven stop after TP1
+**Trigger types (v2):**
+- **Bars:** the engine builds clock-aligned 1m and 5m bars in ET from ticks. A bar's close is the last tick in it, known when the next bar's first tick arrives. Sparse ticks delay a close; they never invent one.
+- **`confirm: close`:** the zone is judged on bar closes.
+  - Fires on the first close inside after a close outside, or after the first-sight price outside. Intrabar wicks don't count.
+  - Closes are tracked **through closed gates**, so a close-through that happened before `not_before` is not fired late when the gate opens. It needs a fresh close-through.
+  - At first sight, the tick price seeds the state (`AlreadyInZone` if inside).
+- **`confirm: dwell`:** price must stay in the zone for `seconds` after a fresh entry.
+  - The clock resets when price leaves, and it runs through closed gates.
+  - The trigger fires on the first tick with gates open once the dwell is satisfied.
+- **`approach`:** for tick mode, the previous tick must be beyond the zone on that side. For close mode, the previous close. For dwell, the tick before the entry; an entry from the wrong side doesn't start the clock.
+- **`first_touch`:** entries into the zone are counted on tick prices, ignoring gates. Already inside at first sight counts as a touch, and so does a jump through the zone. The trigger fires only while it's on touch #1.
+- **`then_stop: breakeven`:**
+  - When that target is hit, the stop moves to the entry price (`StopMoved` event). It only ever tightens.
+  - Entry = `mark_filled(fill_price)`, or the fire price if no fill was given (C1 will supply fills).
+  - With no entry price known, it emits `EngineWarning` and leaves the stop unchanged.
+- **`stop_confirm: close`:** a stop counts only when a 1m or 5m bar closes beyond it. The default tick stop exits on the first tick through, which is the fastest. There's no hard backstop for close-confirmed stops yet.
+
+**[planned] (see V2_STATUS):** a "stall"/rejection pattern; plan-level `no_entries_before` with the early-entry override.
 
 ## 7. Watcher (`main.py`)
 
@@ -174,7 +189,7 @@ Events: `TriggerFired`, `TargetHit`, `StopHit`, `Invalidated`, `FlatByReached`, 
 
   WAIT re-arms the trigger; otherwise Discord gets an alert with EXECUTE/SKIP.
 - **`decide()` runs as a background task (v2),** so stops and targets on other trades keep being checked during its up-to-30 s call. When it returns, the alert is sent only if the trigger is still FIRED; a replan may have dropped or reset it. `wait_for_decisions()` drains pending calls (end of `--sim`, tests). Shutdown cancels them.
-- **`AlreadyInZone` and `ZoneSkipped`** each post a short Discord notice.
+- **`AlreadyInZone` and `ZoneSkipped`** each post a short Discord notice. **`StopMoved`** posts "STOP MOVED … move your stop order to match".
 - `PLAN_AUTOGEN=false` (the default) disables v1's 08:00 auto-plan.
 
 ## 8. Feed (`feed.py`)
