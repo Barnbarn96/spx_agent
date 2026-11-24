@@ -1,0 +1,78 @@
+{
+  "date": "2026-11-23",
+  "generated_at": "2026-11-23T09:27:00-05:00",
+  "bias": "bullish",
+  "spx_reference": 7250.0,
+  "spx_reference_source": "spreadex 7250 @ 09:27 ET",
+  "spx_prev_close": 6910.39,
+  "triggers": [
+    {
+      "id": "buy_dip",
+      "side": "long",
+      "condition": {
+        "price_between": [7195.0, 7215.0],
+        "not_before": "10:00",
+        "not_after": "15:00"
+      },
+      "action": {"instrument": "SPX 0DTE call", "size_pct": 15},
+      "targets": [
+        {"level": 7250.0, "scale_out_pct": 50},
+        {"level": 7288.0, "scale_out_pct": 50}
+      ],
+      "stop": 7172.0,
+      "one_shot": true
+    },
+    {
+      "id": "breakout_long",
+      "side": "long",
+      "condition": {
+        "price_above": 7260.0,
+        "not_before": "10:00",
+        "not_after": "15:00",
+        "requires_not_filled": ["buy_dip"]
+      },
+      "action": {"instrument": "SPX 0DTE call", "size_pct": 10},
+      "targets": [
+        {"level": 7288.0, "scale_out_pct": 50},
+        {"level": 7324.0, "scale_out_pct": 50}
+      ],
+      "stop": 7238.0,
+      "one_shot": true
+    },
+    {
+      "id": "fade_7288",
+      "side": "short",
+      "condition": {
+        "price_above": 7288.0,
+        "not_before": "10:00",
+        "not_after": "15:00",
+        "requires_not_filled": ["breakout_long"]
+      },
+      "action": {"instrument": "SPX 0DTE put", "size_pct": 10},
+      "targets": [{"level": 7250.0, "scale_out_pct": 100}],
+      "stop": 7302.0,
+      "one_shot": true
+    },
+    {
+      "id": "breakdown_short",
+      "side": "short",
+      "condition": {
+        "price_below": 7170.0,
+        "not_before": "10:00",
+        "not_after": "15:00",
+        "requires_not_filled": ["buy_dip"]
+      },
+      "action": {"instrument": "SPX 0DTE put", "size_pct": 10},
+      "targets": [
+        {"level": 7150.0, "scale_out_pct": 50},
+        {"level": 7100.0, "scale_out_pct": 50}
+      ],
+      "stop": 7190.0,
+      "one_shot": true
+    }
+  ],
+  "invalidation": {"below": 7100.0, "action": "gap fully fading — stand aside, no new entries"},
+  "flat_by": "15:30",
+  "scheduled_events": [],
+  "notes": "Cautiously bullish after the Huang reinstatement gap. Must-hold 7150, resistance 7250 then 7288. Breakout should be a 5-minute close above 7260 and the 7288 fade needs a stall — v2 engine can't express either yet, so confirm by eye. Take half at TP1 and move the stop to breakeven by hand."
+}

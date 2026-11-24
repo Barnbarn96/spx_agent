@@ -6,6 +6,37 @@ targets, risk gates); the LLM only decides *whether* to act on it. Nothing
 executes automatically — every entry needs an explicit Discord button tap.
 See [SPEC.md](SPEC.md) for the full design.
 
+## v2 quick start (release-v2)
+
+v2 splits the work in two. **Claude Code is the analyst** (open this folder
+in Claude Code desktop; see [CLAUDE.md](CLAUDE.md)) and **`main.py` is the
+watcher**. They share files under `state/`.
+
+1. One-time: `py -3.12 -m venv .venv`, then
+   `.venv\Scripts\python.exe -m pip install -r requirements.txt`, then
+   copy `.env.example` to `.env` (`FEED_SOURCE=moomoo`, Discord token/channel).
+2. Start the watcher in a terminal and leave it running:
+   `.venv\Scripts\python.exe main.py` (Moomoo OpenD must be running).
+3. In Claude Code:
+   - `/premarket 7250` with the TradingView `SPREADEX:SPX` price, plus a
+     Moomoo GEX screenshot if you have one. It writes `analyses/<date>.md`
+     and installs `state/plan_<date>.json`. `main.py` loads it within seconds
+     and posts the summary to Discord.
+   - `/intraday 7268 4.93` during the session (SPX, 10Y) or with a GEX or
+     data screenshot. The 10Y is only entered by hand and expires after
+     20 min. Triggers with yield conditions pause until a fresh one arrives.
+   - `/eod` after the close to roll `context/` forward.
+
+What changed from v1:
+- the 08:00 auto-plan is off (`PLAN_AUTOGEN=false`)
+- the SPY->SPX ratio comes from the previous closes (`spx_prev_close` in the plan)
+- yield-level trigger conditions (`yield_below` / `yield_above`)
+- GEX input and a check of the SPX estimate against the screenshot price
+- `decide()` gets yield, GEX and plan notes
+- inputs are polled on a timer instead of on ticks
+
+The rest of this README describes v1.
+
 ## 1. Setup
 
 ```

@@ -5,7 +5,7 @@ NOTE: PolygonFeed is implemented against Polygon.io's documented indices
 websocket protocol but has not been exercised against a live connection in
 this environment (no configured POLYGON_API_KEY, and market-data messages
 only flow during RTH). Treat it as unverified until run live — see
-ROLLOUT_PLAN.md.
+docs/v1/ROLLOUT_PLAN.md.
 
 NOTE: MoomooFeed estimates SPX from SPY (the ETF), not the index directly —
 confirmed live that Moomoo's OpenAPI rejects subscribing to US indices
@@ -15,7 +15,7 @@ calibrated against a known-good SPX reference (see MoomooFeed.calibrate),
 not hardcoded, since the ratio drifts slowly over time. Quote timestamps
 (data_date/data_time, confirmed to include fractional seconds live) are
 assumed to already be ET wall-clock time. Requires the Moomoo desktop app
-running, logged in, with OpenD running locally — see ROLLOUT_PLAN.md.
+running, logged in, with OpenD running locally — see docs/v1/ROLLOUT_PLAN.md.
 """
 
 from __future__ import annotations
@@ -154,18 +154,48 @@ class MoomooFeed(TickSource):
         self.port = port
         self.spy_code = spy_code
         self.ratio = initial_ratio
+        self.ratio_source = "initial guess (MOOMOO_SPY_SPX_RATIO)"
         self._last_spy_price: float | None = None
         self._pending_spx_reference: float | None = None
+        # v2 close-to-close calibration: SPX prev close (from the plan) and
+        # SPY prev close (from Moomoo's own quote rows).
+        self._spx_prev_close: float | None = None
+        self._spy_prev_close: float | None = None
 
     def calibrate(self, spx_reference: float) -> None:
-        """Recompute the SPY->SPX ratio against a known-good SPX price
-        (e.g. the operator-supplied plan.spx_reference). Applied
-        immediately if a SPY tick has already arrived; otherwise queued
-        and applied on the next one."""
+        """v1 fallback: recompute the SPY->SPX ratio against a live SPX
+        estimate (plan.spx_reference) and whatever SPY last printed. Less
+        accurate than calibrate_from_prev_close() — the two prices come from
+        different moments and pre-market SPY is thin — so it is ignored once
+        a close-to-close calibration is available."""
+        if self._spx_prev_close is not None:
+            return
         if self._last_spy_price:
             self.ratio = spx_reference / self._last_spy_price
+            self.ratio_source = f"spx_reference {spx_reference:g} / live SPY {self._last_spy_price:g}"
         else:
             self._pending_spx_reference = spx_reference
+
+    def calibrate_from_prev_close(self, spx_prev_close: float) -> None:
+        """Preferred: ratio = previous SPX close / previous SPY close, both
+        official 4 PM prints. SPY's previous close is read from Moomoo's
+        quote rows (prev_close_price), so the ratio is applied as soon as
+        one arrives. Replans that keep the same spx_prev_close leave it
+        unchanged.
+
+        Not handled automatically: SPY ex-dividend days, when SPY's prior
+        close drops by the dividend — the ratio is then off by roughly the
+        dividend (~0.2%). Recalibrate by hand on those days."""
+        self._spx_prev_close = spx_prev_close
+        self._pending_spx_reference = None
+        self._apply_prev_close_ratio()
+
+    def _apply_prev_close_ratio(self) -> None:
+        if self._spx_prev_close and self._spy_prev_close:
+            self.ratio = self._spx_prev_close / self._spy_prev_close
+            self.ratio_source = (
+                f"prev closes: SPX {self._spx_prev_close:g} / SPY {self._spy_prev_close:g}"
+            )
 
     def _to_tick(self, row) -> Tick | None:
         try:
@@ -177,8 +207,16 @@ class MoomooFeed(TickSource):
         ts = _parse_moomoo_ts(str(row.get("data_date", "")), str(row.get("data_time", "")))
 
         self._last_spy_price = spy_price
-        if self._pending_spx_reference is not None:
+        try:
+            prev_close = float(row.get("prev_close_price") or 0)
+        except (TypeError, ValueError):
+            prev_close = 0.0
+        if prev_close > 0 and prev_close != self._spy_prev_close:
+            self._spy_prev_close = prev_close
+            self._apply_prev_close_ratio()
+        if self._pending_spx_reference is not None and self._spx_prev_close is None:
             self.ratio = self._pending_spx_reference / spy_price
+            self.ratio_source = f"spx_reference {self._pending_spx_reference:g} / live SPY {spy_price:g}"
             self._pending_spx_reference = None
 
         # yield_10y is always None — Futu/moomoo's OpenAPI covers equities/

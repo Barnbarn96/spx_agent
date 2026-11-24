@@ -22,8 +22,27 @@ MAX_OPEN_TRIGGERS = int(os.environ.get("MAX_OPEN_TRIGGERS", "1"))
 YIELD_WINDOW_MIN = int(os.environ.get("YIELD_WINDOW_MIN", "5"))
 YIELD_EPSILON = float(os.environ.get("YIELD_EPSILON", "0.005"))
 
-DECIDE_MODEL = os.environ.get("DECIDE_MODEL", "claude-sonnet-4-6")
-PLAN_MODEL = os.environ.get("PLAN_MODEL", "claude-sonnet-4-6")
+DECIDE_MODEL = os.environ.get("DECIDE_MODEL", "claude-sonnet-5-5")
+PLAN_MODEL = os.environ.get("PLAN_MODEL", "claude-sonnet-5-5")
+
+# --------------------------------------------------------------------------
+# v2: operator inputs (inputs.py)
+# --------------------------------------------------------------------------
+
+# A manually entered 10Y yield counts as missing after this many minutes —
+# yield-level triggers then fail closed and Discord asks for a fresh one.
+YIELD_MAX_AGE_MIN = float(os.environ.get("YIELD_MAX_AGE_MIN", "20"))
+# GEX read off a screenshot is shown as STALE to decide() after this long.
+GEX_MAX_AGE_MIN = float(os.environ.get("GEX_MAX_AGE_MIN", "90"))
+# Warn when the SPX printed in a fresh GEX screenshot differs from the
+# SPY-based estimate by more than this many points.
+SPX_ESTIMATE_DRIFT_WARN_PTS = float(os.environ.get("SPX_ESTIMATE_DRIFT_WARN_PTS", "2"))
+# How often main.py polls state/ for plan / yield / GEX changes and checks
+# time-based reminders. Runs on its own timer, independent of ticks.
+INPUT_POLL_S = float(os.environ.get("INPUT_POLL_S", "5"))
+# v1 generated a plan automatically at 08:00 ET. In v2 the plan comes from
+# Claude Code's /premarket command, so this is off unless explicitly enabled.
+PLAN_AUTOGEN = os.environ.get("PLAN_AUTOGEN", "false").strip().lower() in ("1", "true", "yes")
 
 # Thinking/tool-use depth per call site: low|medium|high|xhigh|max, or blank
 # to leave it to the model's own default. These are deliberately separate —
@@ -61,7 +80,7 @@ SGT_TZ = "Asia/Singapore"
 ENTRY_CUTOFF_ET = "15:00"
 
 # feed.py: which live source main.py's run_live() uses — "polygon" or "moomoo"
-FEED_SOURCE = os.environ.get("FEED_SOURCE", "polygon")
+FEED_SOURCE = os.environ.get("FEED_SOURCE", "moomoo")  # v2 default: Moomoo (SPY-based)
 
 # feed.py: Polygon.io indices websocket
 POLYGON_WS_URL = os.environ.get("POLYGON_WS_URL", "wss://socket.polygon.io/indices")
@@ -83,9 +102,6 @@ FEED_RECONNECT_MIN_S = 1
 FEED_RECONNECT_MAX_S = 60
 FEED_STALE_S = 10  # dead-man rule: no tick for this long during RTH -> FeedStale
 HEARTBEAT_INTERVAL_S = float(os.environ.get("HEARTBEAT_INTERVAL_S", "60"))
-# How often run_live() re-stats state/plan_<today>.json to notice a manual
-# `python -m agent replan` having rewritten it, and hot-swaps the engine.
-PLAN_RELOAD_POLL_S = float(os.environ.get("PLAN_RELOAD_POLL_S", "15"))
 
 # releases.py: Finnhub economic calendar
 FINNHUB_CALENDAR_URL = os.environ.get(

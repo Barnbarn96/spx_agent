@@ -6,3 +6,7 @@ state/*.db
 state/plan_*.json
 state/HALT
 daily_plans/*.json
+.venv/
+state/*.json
+state/*.tmp
+analyses/*.md

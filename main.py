@@ -6,7 +6,7 @@ routing. See SPEC.md.
 full loop (including real Discord confirm/skip/mark-filled buttons) can be
 exercised end-to-end without market hours. Live mode (feed.py's
 PolygonFeed, scheduler.py's cron jobs) has not been exercised against real
-market data in this environment — see ROLLOUT_PLAN.md.
+market data in this environment — see docs/v1/ROLLOUT_PLAN.md.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 import agent
 import config
+import inputs
 import releases
 from feed import FeedManager, FeedStale, MoomooFeed, PolygonFeed, ReplayTickSource, TickSource
 from journal import JournalDB
@@ -69,6 +70,12 @@ class Orchestrator:
         self.scheduler: AgentScheduler | None = None
         self._feed_source: TickSource | None = None  # set in run_live(); moomoo calibrates from this
         self._plan_file_mtime: float | None = None  # for detecting a manual replan mid-session
+        # v2 operator inputs (inputs.py), refreshed by poll_inputs()
+        self.manual_yield: inputs.YieldInput | None = None
+        self.gex: inputs.GexInput | None = None
+        self._yield_mtime: float | None = None
+        self._gex_mtime: float | None = None
+        self._yield_nudge_sent = False
 
     # -- plan lifecycle ---------------------------------------------------
 
@@ -89,18 +96,29 @@ class Orchestrator:
         # rather than snapshotting it once at Notifier construction.
         if self.notifier is not None:
             self.notifier.engine = self.engine
-        # MoomooFeed estimates SPX from SPY via a calibrated ratio — refresh
-        # it from the operator-verified spx_reference on every plan load
-        # (daily generation and any replan) so it doesn't drift for the life
-        # of a long-running process.
-        if isinstance(self._feed_source, MoomooFeed):
-            self._feed_source.calibrate(plan.spx_reference)
+        self._calibrate_feed()
         return cleared_invalidation
+
+    def _calibrate_feed(self) -> None:
+        """MoomooFeed estimates SPX as SPY x ratio. v2 prefers a close-to-
+        close ratio (plan.spx_prev_close / SPY's previous close); plans
+        without spx_prev_close fall back to v1's spx_reference calibration."""
+        if self.plan is None or not isinstance(self._feed_source, MoomooFeed):
+            return
+        if self.plan.spx_prev_close is not None:
+            self._feed_source.calibrate_from_prev_close(self.plan.spx_prev_close)
+        else:
+            print(
+                "[main] plan has no spx_prev_close — falling back to calibrating the "
+                "SPY->SPX ratio against spx_reference (less accurate)",
+                file=sys.stderr,
+            )
+            self._feed_source.calibrate(self.plan.spx_reference)
 
     async def on_generate_plan(self) -> None:
         """Scheduler callback: 08:00 ET pre-market plan generation. Live
         mode only — best-effort context gathering, unverified against a
-        real pre-market session (see ROLLOUT_PLAN.md)."""
+        real pre-market session (see docs/v1/ROLLOUT_PLAN.md)."""
         today = datetime.now(ET).date()
         econ_calendar_text = await self._fetch_econ_calendar_text(today)
         context = {
@@ -205,10 +223,24 @@ class Orchestrator:
 
     # -- tick processing (shared by live and --sim) --------------------------
 
-    async def process_tick(self, tick: Tick) -> None:
-        self.last_price = tick.price
+    def _attach_yield(self, tick: Tick) -> Tick:
+        """A fresh manual 10Y (state/yield.json) overrides the feed's; an
+        expired one is dropped so yield conditions fail closed. Feed yields
+        quoted TNX-style (x10) are normalized to percent."""
+        now = tick.ts.astimezone(ET)
+        if self.manual_yield is not None and self.manual_yield.is_fresh(now):
+            return tick.model_copy(update={"yield_10y": self.manual_yield.value})
         if tick.yield_10y is not None:
-            self.last_yield = tick.yield_10y
+            try:
+                return tick.model_copy(update={"yield_10y": inputs.normalize_yield(tick.yield_10y)})
+            except ValueError:
+                return tick.model_copy(update={"yield_10y": None})
+        return tick
+
+    async def process_tick(self, tick: Tick) -> None:
+        tick = self._attach_yield(tick)
+        self.last_price = tick.price
+        self.last_yield = tick.yield_10y
         if self.engine is None:
             return
 
@@ -251,6 +283,7 @@ class Orchestrator:
             "other_trigger_statuses": {
                 tid: s.status.value for tid, s in self.engine.states.items() if tid != event.trigger_id
             },
+            "notes": self._decide_notes(event.tick),
         }
 
         start = time.monotonic()
@@ -266,6 +299,117 @@ class Orchestrator:
             await self.notifier.send_trigger_fired(trigger, event.tick, decision, decision_id)
         # else: no Discord configured — decision is journaled; operator
         # must review journal.db manually to confirm/skip.
+
+    def _decide_notes(self, tick: Tick) -> str:
+        """Extra context for decide()'s "Additional context" slot, which v1
+        never filled."""
+        now = tick.ts.astimezone(ET)
+        notes = []
+        if self.manual_yield is not None:
+            age_min = int(self.manual_yield.age(now).total_seconds() // 60)
+            state = "fresh" if self.manual_yield.is_fresh(now) else "EXPIRED, not used"
+            notes.append(f"10Y {self.manual_yield.value:g}% entered by hand {age_min} min ago ({state})")
+        else:
+            notes.append("10Y: no manual reading entered today")
+        if self.gex is not None:
+            notes.append(self.gex.summary(tick.price, now))
+        if isinstance(self._feed_source, MoomooFeed):
+            notes.append(f"SPX is estimated from SPY (ratio {self._feed_source.ratio:.4f}, {self._feed_source.ratio_source})")
+        if self.plan is not None and self.plan.notes:
+            notes.append(f"Plan notes: {self.plan.notes}")
+        return " | ".join(notes)
+
+    # -- operator inputs (v2), polled on a timer -------------------------------
+
+    async def poll_inputs(self) -> None:
+        """One polling pass: plan file, manual yield, GEX, and time-based
+        reminders. Runs on its own timer (run_input_poller), so a quiet feed
+        or a missing plan never stops inputs from being picked up."""
+        await self._reload_plan_if_file_changed()
+        await self._reload_yield_if_changed()
+        await self._reload_gex_if_changed()
+        await self._check_yield_nudge(datetime.now(ET))
+
+    async def run_input_poller(self) -> None:
+        while True:
+            try:
+                await self.poll_inputs()
+            except Exception as e:  # never let a bad input file kill the loop
+                print(f"[main] input poll failed: {e!r}", file=sys.stderr)
+            await asyncio.sleep(config.INPUT_POLL_S)
+
+    async def _reload_yield_if_changed(self) -> None:
+        mtime = inputs.file_mtime(inputs.YIELD_FILE)
+        if mtime is None or mtime == self._yield_mtime:
+            return
+        y = inputs.read_yield()
+        if y is None:
+            return  # unreadable — retry on the next poll
+        self._yield_mtime = mtime
+        self.manual_yield = y
+        self._yield_nudge_sent = False
+        print(f"[main] 10Y yield updated: {y.value:g}% ({y.source}, {y.ts.isoformat()})", file=sys.stderr)
+
+    async def _reload_gex_if_changed(self) -> None:
+        mtime = inputs.file_mtime(inputs.GEX_FILE)
+        if mtime is None or mtime == self._gex_mtime:
+            return
+        gex = inputs.read_gex()
+        if gex is None:
+            return
+        self._gex_mtime = mtime
+        self.gex = gex
+        now = datetime.now(ET)
+        print(f"[main] {gex.summary(self.last_price, now)}", file=sys.stderr)
+        await self._check_spx_estimate_drift(gex, now)
+
+    async def _check_spx_estimate_drift(self, gex: inputs.GexInput, now: datetime) -> None:
+        """A GEX screenshot shows the real .SPX price. If it's recent, compare
+        it with the SPY-based estimate and warn on drift."""
+        if gex.spx_in_shot is None or self.last_price is None:
+            return
+        if not isinstance(self._feed_source, MoomooFeed):
+            return
+        if abs((now - gex.as_of).total_seconds()) > 180:
+            return  # too old to compare against the current estimate
+        drift = self.last_price - gex.spx_in_shot
+        if abs(drift) > config.SPX_ESTIMATE_DRIFT_WARN_PTS and self.notifier:
+            await self.notifier.send_text(
+                f"SPX estimate check: SPY-based estimate {self.last_price:.2f} vs screenshot "
+                f"{gex.spx_in_shot:.2f} ({drift:+.2f} pts). Ratio {self._feed_source.ratio:.4f} "
+                f"from {self._feed_source.ratio_source}."
+            )
+
+    def _plan_uses_yield_levels(self) -> bool:
+        if self.engine is None:
+            return False
+        return any(
+            s.status.value == "ARMED"
+            and (s.trigger.condition.yield_below is not None or s.trigger.condition.yield_above is not None)
+            for s in self.engine.states.values()
+        )
+
+    async def _check_yield_nudge(self, now: datetime) -> None:
+        """Remind the operator once per lapse when an armed trigger depends on
+        the 10Y and the manual reading is missing or expired during RTH."""
+        rth = now.weekday() < 5 and (9, 30) <= (now.hour, now.minute) < (16, 0)
+        fresh = self.manual_yield is not None and self.manual_yield.is_fresh(now)
+        if not rth or fresh or not self._plan_uses_yield_levels():
+            return
+        if self._yield_nudge_sent:
+            return
+        self._yield_nudge_sent = True
+        if self.notifier:
+            last = (
+                f"last {self.manual_yield.value:g}% at {self.manual_yield.ts.astimezone(ET):%H:%M} ET"
+                if self.manual_yield is not None
+                else "none entered today"
+            )
+            await self.notifier.send_text(
+                f"10Y yield needed ({last}). Triggers with yield conditions are paused until "
+                f"you send a fresh one: `/intraday <spx> <10y>` in Claude Code, or "
+                f"`python tools/set_yield.py 4.93`."
+            )
 
     # -- live vs --sim drivers ------------------------------------------------
 
@@ -300,8 +444,15 @@ class Orchestrator:
         old_plan = self.plan
         await self.journal.log_plan(new_plan, "manual_replan")
         cleared_invalidation = self._load_plan(new_plan, "manual_replan")
+        if old_plan is None:
+            # v2: the first plan of the day usually arrives this way, written
+            # by Claude Code's /premarket while main.py is already running.
+            print(f"[main] loaded today's plan from {path}", file=sys.stderr)
+            if self.notifier:
+                await self.notifier.send_plan_summary(new_plan)
+            return
         print(f"[main] hot-swapped to re-planned {path}", file=sys.stderr)
-        if self.notifier and old_plan is not None:
+        if self.notifier:
             await self.notifier.send_replan_diff(old_plan, new_plan, "manual re-plan (operator-initiated)")
             if cleared_invalidation:
                 await self.notifier.send_text(
@@ -323,11 +474,12 @@ class Orchestrator:
             self._load_plan(plan, "daily")
             print(f"[main] loaded existing plan for {today} from {path}", file=sys.stderr)
         else:
-            print(
-                f"[main] no plan for {today} on disk yet — waiting for the "
-                f"{config.PLAN_GENERATION_TIME_ET} ET scheduled job",
-                file=sys.stderr,
+            waiting_for = (
+                f"the {config.PLAN_GENERATION_TIME_ET} ET scheduled job"
+                if config.PLAN_AUTOGEN
+                else "/premarket in Claude Code (picked up automatically when written)"
             )
+            print(f"[main] no plan for {today} on disk yet — waiting for {waiting_for}", file=sys.stderr)
 
     async def run_live(self) -> None:
         self._load_todays_plan_if_present()
@@ -348,8 +500,7 @@ class Orchestrator:
         else:
             raise ValueError(f"unknown FEED_SOURCE: {config.FEED_SOURCE!r} (expected polygon|moomoo)")
         self._feed_source = source
-        if self.plan is not None and isinstance(source, MoomooFeed):
-            source.calibrate(self.plan.spx_reference)  # in case a plan already loaded above
+        self._calibrate_feed()  # in case a plan already loaded above
 
         print(
             f"[main] feed source: {config.FEED_SOURCE}. Streaming ticks — "
@@ -358,8 +509,16 @@ class Orchestrator:
         )
         tick_count = 0
         last_heartbeat = time.monotonic()
-        last_plan_check = time.monotonic()
 
+        # v2: plan / yield / GEX files are polled on their own timer, so they
+        # are picked up even before the feed produces its first tick.
+        poller = asyncio.ensure_future(self.run_input_poller())
+        try:
+            await self._consume_feed(source, tick_count, last_heartbeat)
+        finally:
+            poller.cancel()
+
+    async def _consume_feed(self, source: TickSource, tick_count: int, last_heartbeat: float) -> None:
         feed_manager = FeedManager(source)
         async for item in feed_manager.watch():
             if isinstance(item, FeedStale):
@@ -371,10 +530,6 @@ class Orchestrator:
             await self.process_tick(item)
 
             now = time.monotonic()
-            if now - last_plan_check >= config.PLAN_RELOAD_POLL_S:
-                last_plan_check = now
-                await self._reload_plan_if_file_changed()
-
             if now - last_heartbeat >= config.HEARTBEAT_INTERVAL_S:
                 last_heartbeat = now
                 plan_state = "no plan loaded" if self.engine is None else f"plan {self.plan.date} loaded"

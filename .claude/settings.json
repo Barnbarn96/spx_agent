@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(spx-premarket-analysis)",
+      "Skill(spx-intraday-read)",
+      "Skill(spx-context-update)",
+      "Bash(.venv/Scripts/python.exe tools/set_yield.py:*)",
+      "Bash(.venv/Scripts/python.exe tools/set_gex.py:*)",
+      "Bash(.venv/Scripts/python.exe tools/write_plan.py:*)",
+      "Bash(.venv/Scripts/python.exe -m pytest:*)",
+      "Read(context/**)",
+      "Read(analyses/**)",
+      "Read(state/*.json)",
+      "Write(analyses/**)",
+      "Edit(analyses/**)",
+      "Write(context/**)"
+    ],
+    "ask": [
+      "Edit(.claude/settings.json)",
+      "Edit(.claude/skills/**)",
+      "Edit(.claude/commands/**)",
+      "Bash(git push:*)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(.env.local)",
+      "Edit(state/**)",
+      "Write(state/**)"
+    ]
+  }
+}

@@ -41,12 +41,15 @@ class AgentScheduler:
         cutoff_hh, cutoff_mm = _parse_hhmm(config.ENTRY_CUTOFF_NOTICE_TIME_ET)
         eod_hh, eod_mm = _parse_hhmm(config.EOD_SUMMARY_TIME_ET)
 
-        self.scheduler.add_job(
-            self.callbacks.on_generate_plan,
-            CronTrigger(day_of_week="mon-fri", hour=gen_hh, minute=gen_mm, timezone=ET),
-            id="generate_plan",
-            replace_existing=True,
-        )
+        # v2: the plan normally comes from Claude Code's /premarket command;
+        # the old 08:00 auto-generation only runs when PLAN_AUTOGEN is set.
+        if config.PLAN_AUTOGEN:
+            self.scheduler.add_job(
+                self.callbacks.on_generate_plan,
+                CronTrigger(day_of_week="mon-fri", hour=gen_hh, minute=gen_mm, timezone=ET),
+                id="generate_plan",
+                replace_existing=True,
+            )
         self.scheduler.add_job(
             self.callbacks.on_entry_cutoff,
             CronTrigger(day_of_week="mon-fri", hour=cutoff_hh, minute=cutoff_mm, timezone=ET),

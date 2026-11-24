@@ -475,7 +475,7 @@ async def _main_async(args: argparse.Namespace) -> int:
         if not args.dry_run:
             print(
                 "The running main.py will hot-swap to this plan within "
-                f"{config.PLAN_RELOAD_POLL_S:g}s, preserving FIRED/OPEN trigger state.",
+                f"{config.INPUT_POLL_S:g}s, preserving FIRED/OPEN trigger state.",
                 file=sys.stderr,
             )
         return 0

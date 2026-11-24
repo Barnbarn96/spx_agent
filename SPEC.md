@@ -1,272 +1,281 @@
-# 0DTE SPX Trading Agent — Implementation Spec
+# 0DTE SPX Trading Agent — v2 Spec
 
-Local, single-process trading assistant that (1) generates a structured daily trade plan via the Claude API, (2) watches live SPX prices against that plan with a deterministic trigger engine, (3) re-plans automatically when scheduled economic data releases, and (4) sends decisions to Discord for tap-to-confirm execution. **Phase 1 is alerts-only — no order routing.**
+This is the contract for `release-v2`. Code that disagrees with it is a bug, unless the spec is out of date. In that case, fix the spec first, then the code.
 
----
+- **Where the build stands and what to do next:** [docs/V2_STATUS.md](docs/V2_STATUS.md). Read it before starting work.
+- **v1 design and verification history:** [docs/v1/SPEC.md](docs/v1/SPEC.md) and [docs/v1/ROLLOUT_PLAN.md](docs/v1/ROLLOUT_PLAN.md).
 
-## Context
-
-- Operator runs a manual pre-market 0DTE SPX analysis (GEX, macro catalysts, sentiment) producing a prose plan with entry zones, targets, stops, and scenario probabilities.
-- Goal: automate the mechanical parts — level monitoring, data-release re-planning, decision logging — while keeping the operator in the loop for execution.
-- Operator is in Singapore (SGT); market hours are US ET. **All internal time handling must be in `America/New_York` via `zoneinfo`.** Never use naive datetimes or local system time.
-
-## Design principles (non-negotiable)
-
-1. **Deterministic layer decides WHEN, LLM decides WHETHER.** Price triggers, stops, targets, cutoff times, and risk limits are plain code. The LLM is only invoked at decision points and only chooses between pre-defined actions.
-2. **The LLM never originates numbers.** All prices, strikes, sizes, and levels come from the market data feed or the structured plan JSON. Reject/clamp any LLM output containing levels not present in the plan.
-3. **Hard risk guardrails live outside the LLM** as code: daily loss limit, max concurrent triggers, no new entries after 15:00 ET, kill switch via `state/HALT` file.
-4. **Everything is testable offline** via a tick-replay harness before any live connection.
-
-## Non-goals (Phase 1)
-
-- No automated order execution (alerts + confirm buttons only).
-- No sub-second latency requirements (level trading, not HFT).
-- No GEX computation from raw options chains (plan generation prompt handles GEX narrative; a data integration can come later).
+Sections marked **[planned]** describe agreed v2 behaviour that isn't built yet. Everything else is implemented and covered by tests.
 
 ---
 
-## Repository layout
+## 1. What it is
+
+An **alerts-only** assistant for trading SPX 0DTE options. It never places orders: every entry needs the operator's tap in Discord.
+
+v2 splits the work in two:
+
+| Half | Runs as | Job |
+|---|---|---|
+| **Analyst** | Claude Code desktop, in this repo (`CLAUDE.md`, `.claude/`) | Pre-market analysis and the day's plan, intraday reads, end-of-day context update. Uses the operator's 3 skills. |
+| **Watcher** | `python main.py`, in its own terminal, all session | Streams SPX, evaluates the plan's triggers, asks `decide()` when one fires, posts Discord alerts with EXECUTE/SKIP buttons, journals everything. |
+
+**The two halves only communicate through files in `state/`**, written by `tools/*.py`. Neither calls the other.
+
+### Operator workflow (times in ET; the operator is in Singapore, SGT = ET+13 until 2027-03-14, then ET+12)
+
+1. **Before the open:** start `main.py`, then run `/premarket <SPREADEX:SPX price>` in Claude Code, optionally with a Moomoo GEX screenshot. The plan is installed and `main.py` picks it up and posts a summary.
+2. **During the session:** run `/intraday <SPX> <10Y>`, or `/intraday` with a data or GEX screenshot. This records the 10Y and GEX and gives a short read. If the bias changed, it offers a replan, which happens only after the operator says yes.
+3. **Discord alerts:** EXECUTE/SKIP on each trigger, then Mark Filled, then target, stop and flat-by alerts.
+4. **After the close:** `/eod` writes the next context doc.
+
+## 2. Design principles (non-negotiable)
+
+1. **Code decides WHEN, the model decides WHETHER.** Triggers, stops, targets, times and risk limits are plain code. `decide()` only picks EXECUTE / SKIP / WAIT for an action that's already fully specified.
+2. **Models never originate numbers.**
+   - Every level in a plan must appear in that day's analysis write-up; `tools/write_plan.py` enforces this.
+   - `date` and `generated_at` are stamped by code.
+   - `decide()` can't change levels, size or instrument.
+3. **Hard guardrails live in code, not prompts:** the HALT file, the daily loss limit, max open trades, the 15:00 entry cutoff, and `flat_by` ≤ 15:30.
+4. **Fail closed.**
+   - A missing or expired input (yield, plan) blocks the triggers that depend on it, never the other way round.
+   - `decide()` errors become SKIP.
+   - Unparseable input files are ignored and retried.
+5. **Never go dark.** A risk block refuses the EXECUTE tap with a reason; it doesn't suppress the alert.
+6. **Times are `America/New_York`** via `zoneinfo`, never naive datetimes. Plan times are ET `HH:MM`.
+7. **Every input carries a timestamp and expires.** An old value is treated as missing, never as current.
+8. **Testable offline.** No test may need the network, Moomoo, Discord or a model.
+
+## 3. Repository layout
 
 ```
-trading-agent/
-├── main.py              # asyncio entrypoint: supervises tasks, wires modules
-├── config.py            # env/config loading (.env), constants
-├── schema.py            # pydantic v2 models: Plan, Trigger, Condition, Action, events
-├── triggers.py          # deterministic trigger engine (pure, no I/O)
-├── agent.py             # Claude API: plan generation, decision calls, re-plan calls
-├── scheduler.py         # APScheduler jobs: pre-market, release polls, 15:00 cutoff
-├── feed.py              # market data websocket client — async tick stream
-├── releases.py          # econ calendar polling at release times
-├── risk.py              # guardrails: HALT file, loss limits, entry cutoff
-├── notify.py            # Discord bot: alerts, inline confirm/skip buttons
-├── journal.py            # SQLite logging: every tick-trigger-decision-outcome
-├── replay.py            # offline harness: replay ticks from CSV against a plan
-├── prompts/
-│   ├── daily_plan.md    # pre-market plan generation prompt (operator's existing prompt, adapted)
-│   ├── replan.md        # data-release re-plan prompt
-│   └── decide.md        # trigger-fired decision prompt
-├── state/
-│   ├── plan_YYYY-MM-DD.json   # engine-canonical plan — this is what M3's scheduler/engine reads
-│   ├── journal.db
-│   └── HALT             # presence of this file = kill switch
-├── daily_plans/
-│   └── plan_YYYY-MM-DD.json   # human-readable journal archive of every generated plan (dry-run or not); never read by the engine
-├── tests/
-│   ├── test_triggers.py
-│   ├── test_schema.py
-│   └── fixtures/ticks_sample.csv
-├── .env.example
-├── requirements.txt
-└── README.md
+CLAUDE.md                 Claude Code's standing instructions (analyst role, rules, files)
+SPEC.md                   this file
+docs/V2_STATUS.md         build status + handoff for the next agent
+docs/v1/                  archived v1 spec and rollout plan
+.claude/
+  skills/spx-*/           repo copies of the operator's 3 skills (repo copy is the master)
+  commands/               /premarket, /intraday, /eod
+  settings.json           allow list for tools/*.py; denies .env and hand edits to state/
+context/context_<date>.md rolling trading context doc (newest = current)
+analyses/<date>.md        that day's pre-market write-up (+ intraday updates); gitignored
+tools/
+  write_plan.py           validate + ground + install a plan
+  set_yield.py            record a manual 10Y reading
+  set_gex.py              record GEX levels from a screenshot
+inputs.py                 yield.json / gex.json models, atomic read/write, expiry
+main.py                   watcher: feed -> engine -> decide -> notify -> journal; input poller
+triggers.py               deterministic trigger engine (pure, no I/O)
+schema.py                 pydantic models: Plan, Trigger, Condition, events
+agent.py                  decide() (+ v1 plan generation, slated for removal)
+feed.py                   MoomooFeed (SPY x ratio), PolygonFeed (v1, unused), FeedManager
+risk.py                   RiskManager.gate_execute()
+notify.py                 Discord bot: alerts + buttons
+journal.py                SQLite journal
+scheduler.py              cron jobs: entry-cutoff notice, EOD summary (+ v1 release polls)
+replay.py                 offline replay harness (main.py --sim)
+releases.py               v1 econ-calendar polling, slated for removal
+prompts/decide.md         decide() prompt (daily_plan.md / replan.md are v1, slated for removal)
+state/                    runtime files (gitignored): plan_<date>.json, yield.json, gex.json, journal.db, HALT
+daily_plans/              archive copy of every installed plan (gitignored)
+tests/                    pytest; fixtures/ has the Nov 23 analysis + plan_v2_example.json
 ```
 
-Dependencies: `claude-agent-sdk`, `pydantic>=2`, `apscheduler>=3.10`, `websockets`, `httpx`, `aiosqlite`, `discord.py`, `python-dotenv`. Dev: `pytest`, `pytest-asyncio`.
+## 4. File contracts (`state/`)
 
----
+Writers always go through `tools/*.py` / `inputs.py`, which validate and write atomically (temp file + `os.replace`). `main.py` polls `state/` every `INPUT_POLL_S` (5 s) on its own timer, not on ticks.
 
-## Plan JSON schema (`schema.py`)
+| File | Writer | Reader | Contents | Freshness |
+|---|---|---|---|---|
+| `plan_<date>.json` | `tools/write_plan.py` | `main.py` (hot-swap) | `schema.Plan` | Lives for the day. Replacing it requires `--replan`. |
+| `yield.json` | `tools/set_yield.py` | `main.py` | `inputs.YieldInput {value %, source, ts}` | Missing after `YIELD_MAX_AGE_MIN` (20) min |
+| `gex.json` | `tools/set_gex.py` | `main.py` → `decide()` | `inputs.GexInput {expiry_date, gamma_flip, call_wall, put_wall, max_pain, spx_in_shot, as_of, source, notes}` | Shown as STALE after `GEX_MAX_AGE_MIN` (90) min |
+| `journal.db` | `main.py`, `notify.py` | operator / reviews | plans, events, decisions, releases | — |
+| `HALT` | operator or `risk.py` | `risk.py` | presence = no new entries | until removed |
 
-Pydantic v2 models. The daily plan the LLM must emit (via forced JSON / tool-use output):
+## 5. Plan schema (`schema.py`)
 
-```json
-{
-  "date": "2026-07-01",
-  "generated_at": "2026-07-01T08:02:11-04:00",
-  "bias": "bullish",
-  "spx_reference": 7465.0,
-  "triggers": [
-    {
-      "id": "primary_long",
-      "side": "long",
-      "condition": {
-        "price_between": [7465.0, 7472.0],
-        "yields_10y": "falling",
-        "not_after": "15:00",
-        "requires_not_filled": []
-      },
-      "action": {
-        "instrument": "SPX 0DTE 7495C",
-        "size_pct": 50
-      },
-      "targets": [
-        {"level": 7498.0, "scale_out_pct": 40},
-        {"level": 7515.0, "scale_out_pct": 35},
-        {"level": 7527.0, "scale_out_pct": 25}
-      ],
-      "stop": 7450.0,
-      "one_shot": true
-    },
-    {
-      "id": "fade_extension",
-      "side": "short",
-      "condition": {
-        "price_between": [7497.0, 7512.0],
-        "requires_not_filled": ["primary_long"],
-        "not_after": "15:00"
-      },
-      "action": {"instrument": "SPX 0DTE 7480P", "size_pct": 50},
-      "targets": [{"level": 7470.0, "scale_out_pct": 60}, {"level": 7455.0, "scale_out_pct": 40}],
-      "stop": 7525.0,
-      "one_shot": true
-    }
-  ],
-  "invalidation": {"below": 7408.0, "action": "flatten_and_halt"},
-  "flat_by": "15:00",
-  "scheduled_events": [
-    {"time": "10:00", "release": "ISM Manufacturing PMI", "source_id": "finnhub:ism-mfg", "replan": true}
-  ],
-  "notes": "free-text rationale, not machine-read"
-}
-```
+See `python tools/write_plan.py --schema`, and `--example` for a worked plan built from the 2026-11-23 analysis.
 
-Model requirements:
+- **Plan:**
+  - `date`, `generated_at` (stamped by `write_plan.py`)
+  - `bias` (bullish | bearish | neutral)
+  - `spx_reference` (the operator's TradingView `SPREADEX:SPX` price)
+  - `spx_reference_source` (e.g. `"spreadex 7250 @ 09:27 ET"`)
+  - **`spx_prev_close`** (official previous SPX close; drives feed calibration)
+  - `triggers[]`
+  - `invalidation {below?, above?, action}`
+  - `flat_by` (HH:MM ET, ≤ 15:30)
+  - `scheduled_events[]` (v1, slated for removal)
+  - `notes`
+- **Trigger:** `id`, `side` (long | short), `condition`, `action {instrument, size_pct}`, `targets[] {level, scale_out_pct}` (summing to 100±1), `stop` (on the correct side of the entry zone), `one_shot`.
+- **Condition** (all optional, ANDed together):
+  - price: `price_between [lo, hi]`, `price_above`, `price_below`
+  - yield levels, in percent: **`yield_below`**, **`yield_above`**, each validated to 0.5-15 with above < below
+  - `yields_10y` (falling | rising; v1, needs a live yield stream, slated for removal)
+  - time: `not_before`, `not_after`
+  - `requires_not_filled[]`
+- **[planned] new condition fields:**
+  - `confirm {type: tick | close | dwell, timeframe: 1m | 5m, seconds?}`
+  - `approach: from_above | from_below`
+  - `first_touch: bool`
+  - target `then_stop: breakeven`
+  - plan-level `no_entries_before`
 
-- `Condition` fields, all optional, ANDed together: `price_between: tuple[float, float]`, `price_above: float`, `price_below: float`, `yields_10y: Literal["falling","rising"] | None`, `not_before: str (HH:MM ET)`, `not_after: str`, `requires_not_filled: list[str]` (trigger ids that must NOT have fired/filled).
-- Validators: `price_between` low < high; `targets` scale_out_pct sums to 100 ± 1; `stop` on the correct side of the entry zone for the trigger's `side`; trigger ids unique; `requires_not_filled` references existing ids.
-- Times are ET wall-clock strings in the plan; parse against `America/New_York` for the plan's `date`.
-- Also define runtime models: `Tick {ts, price, yield_10y: float | None}`, and engine output events (see below).
+## 6. Trigger engine (`triggers.py`)
 
-## Trigger engine (`triggers.py`)
+Pure and synchronous. Ticks in, events out. Per-trigger state machine: `ARMED → FIRED → (CONFIRMED → OPEN → CLOSED) | SKIPPED | EXPIRED`.
 
-Pure, synchronous, no I/O — takes ticks, returns events. Fully unit-testable.
+Events: `TriggerFired`, `TargetHit`, `StopHit`, `Invalidated`, `FlatByReached`, `ReviewRequired`, `EngineWarning`.
 
-State machine per trigger: `ARMED → FIRED → (CONFIRMED → OPEN → managing targets/stop → CLOSED) | SKIPPED | EXPIRED`.
+**Current rules:**
+- **Entry zone:** fires on a tick inside the zone when the previous tick was outside it, or when there was no previous tick.
+- **Stops, targets and invalidation:** checked as crossings between consecutive ticks, so a gap through a level still emits the event.
+- **Yield conditions:** level conditions use the tick's `yield_10y`. `main.py` only attaches a fresh manual yield, so `None` means missing and the condition fails closed with one `EngineWarning` per lapse.
+- **Requirements:** `requires_not_filled` blocks firing while a referenced trigger is FIRED, CONFIRMED or OPEN. `not_after` expires the trigger, and WAIT re-arms it with a 5-minute cooldown.
+- **After `Invalidated`:** only stops on OPEN trades are evaluated.
+- **Hot-swap (`load_plan`):**
+  - FIRED, CONFIRMED and OPEN state is kept for trigger ids present in both plans.
+  - An OPEN trigger the new plan drops emits `ReviewRequired`.
+  - It clears an invalidation and returns True, and `main.py` alerts on that.
 
-```python
-class TriggerEngine:
-    def __init__(self, plan: Plan): ...
-    def evaluate(self, tick: Tick) -> list[EngineEvent]: ...
-    def confirm(self, trigger_id: str) -> None       # operator tapped EXECUTE
-    def skip(self, trigger_id: str) -> None          # operator tapped SKIP
-    def mark_filled(self, trigger_id: str) -> None   # position opened (manual in Phase 1)
-    def load_plan(self, plan: Plan) -> bool          # hot-swap on re-plan (see rules below); True if it cleared an invalidation
-```
+**[planned] fixes (see V2_STATUS):**
+- confirmation modes instead of single-tick triggering
+- a move through a whole zone between ticks counts as entering it
+- no fire on the first tick when it's already inside a zone
+- direction of approach
+- breakeven stop after TP1
 
-Event types (`EngineEvent` union):
+## 7. Watcher (`main.py`)
 
-- `TriggerFired(trigger_id, tick)` — condition met, request decision. One-shot: never re-fires unless engine explicitly re-arms.
-- `TargetHit(trigger_id, level, scale_out_pct, tick)` — for OPEN positions.
-- `StopHit(trigger_id, tick)`
-- `Invalidated(level, tick)` — plan invalidation crossed — emit + engine enters HALT (no further fires).
-- `FlatByReached(tick)` — first tick at/after `flat_by` with any OPEN position.
+- **Startup:** load `state/plan_<today>.json` if it exists, start the scheduler, the feed and the **input poller** task.
+- **Input poller (every 5 s):**
+  - reload the plan if the file changed. A first plan of the day gets a Discord summary; a replan gets a diff.
+  - reload `yield.json` and `gex.json`.
+  - check the SPX estimate against the screenshot price (when a GEX screenshot is ≤ 3 min old and differs by more than `SPX_ESTIMATE_DRIFT_WARN_PTS`, default 2, post a Discord warning).
+  - during RTH, if an ARMED trigger has a yield condition and the yield is missing or expired, post **one yield reminder per lapse**.
+- **Tick path:**
+  1. Attach the yield. A fresh manual yield overrides the feed's. A feed yield quoted TNX-style (×10) is normalized. An invalid one is dropped.
+  2. `engine.evaluate()`.
+  3. Journal and handle each event.
+- **TriggerFired:** `decide()` gets `market_context.notes`:
+  - the manual yield, its age and whether it's fresh
+  - the GEX summary and regime relative to the flip
+  - the SPY ratio and where it came from
+  - the plan notes
 
-Behavioral rules:
+  WAIT re-arms the trigger; otherwise Discord gets an alert with EXECUTE/SKIP.
+- **[planned]:** run `decide()` as a background task (today it blocks the tick loop for up to 30 s). Persist engine state to disk and restore it on restart.
+- `PLAN_AUTOGEN=false` (the default) disables v1's 08:00 auto-plan.
 
-- **Yield direction**: maintain rolling window of yield ticks (default 5 min); `falling` = current < window mean − epsilon (epsilon = 0.005, configurable). If a condition needs yields but no yield data has arrived, the condition is NOT met (fail-closed) — log a warning event.
-- **Zone entry debounce**: fire on the first tick inside `price_between`, but require the previous tick to be outside the zone OR this to be the first tick seen (prevents refire on load).
-- **Gap-through handling**: if price crosses a stop/target/invalidation level between ticks (previous tick one side, current tick the other) without printing inside it, still emit the event at the current tick.
-- **Hot-swap on re-plan**: keep state for triggers whose id exists in both plans (FIRED/OPEN status preserved; new levels apply); drop removed triggers unless OPEN — an OPEN trigger removed by re-plan emits a `ReviewRequired` event, never silently drops. New triggers start ARMED.
-- **After `Invalidated` or HALT-file detection**: evaluate() returns only stop/flatten-relevant events, never new `TriggerFired`.
-- **`load_plan()` clears an active invalidation.** `invalidated` is otherwise permanent for the engine's lifetime — the deliberate design for the automatic case (a plan invalidating mid-day should not quietly re-arm itself). But a re-plan is an explicit operator decision that the old plan (and its invalidation) no longer holds, so `load_plan()` resets both `invalidated` and `_flat_by_reached` and returns `True` when it did. Both replan paths in `main.py` (`on_release_poll` and the manual-replan hot-swap in `_reload_plan_if_file_changed`) alert on Discord when this happens ("**Invalidation cleared by re-plan**") — clearing a flatten-and-halt is never silent. Without this, a re-plan issued after an `INVALIDATION CROSSED` alert would load fine but its triggers would sit `ARMED` forever and never fire, with no error. Tests: `test_load_plan_clears_invalidation_and_reports_it`, `test_load_plan_reports_false_when_nothing_was_invalidated` in `test_triggers.py`.
+## 8. Feed (`feed.py`)
 
-## Agent module (`agent.py`)
+- **`MoomooFeed`** (the default, `FEED_SOURCE=moomoo`). Moomoo's OpenAPI can't subscribe to US indices, so it subscribes to `US.SPY` with extended hours and computes **SPX ≈ SPY × ratio**.
+- **Calibration priority:**
+  1. **`calibrate_from_prev_close(plan.spx_prev_close)`:** ratio = SPX previous close ÷ SPY `prev_close_price` from the quote rows. Two official 4 PM prints. Replans with the same previous close don't change it.
+  2. Fallback when the plan has no `spx_prev_close`: v1's `calibrate(spx_reference)`, which uses the latest SPY print. It's less accurate, and it's ignored once (1) is set.
 
-**Transport: Claude Agent SDK (`claude-agent-sdk`), authenticated via the operator's Claude subscription (`claude login`) rather than a metered API key.** This is a deliberate M2 decision, not the originally-spec'd raw Messages API — see the M2 conversation log for the reasoning (billing pool tradeoffs, ToS scope for unattended automation). Consequences of the swap:
+  `ratio_source` records which method set the ratio.
+- **Known gaps:**
+  - SPY ex-dividend days aren't adjusted (error about 0.2%).
+  - That `prev_close_price` is present in push rows during extended hours is **unverified live**.
+- **Not available on the operator's Moomoo account:**
+  - SPX index quotes (an API restriction)
+  - MES/ES futures (they need a paid quote card)
+  - Treasury yields (the API doesn't cover them)
 
-- All three calls are `async def` (the SDK's `query()` is an async generator); `main.py`'s asyncio event loop is a natural fit in M3.
-- `generate_plan`/`replan` still use the prose-then-fenced-JSON prompt format (not tool-use/`output_config.format`, since the daily-plan prompt is prose + JSON, not pure JSON) and validate against `schema.py` exactly as before.
-- `decide` uses the SDK's `output_format={"type": "json_schema", ...}` (mirrors the Messages API shape) for forced structured output.
-- The model is granted only the `WebSearch` tool for `generate_plan`/`replan`, and no tools at all for `decide` — never Bash/Read/Write/Edit — since this runs unattended.
-- Every entry point scrubs `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` from the environment before invoking the SDK, since either would silently shadow subscription auth for the spawned `claude` subprocess.
-- Requires the Claude Code CLI on `PATH` (`npm install -g @anthropic-ai/claude-code`) in addition to the `claude-agent-sdk` PyPI package.
+  `US.ES` without `main` resolves to an unrelated stock.
+- `FeedManager`: dead-man rule. No tick for more than 10 s during RTH emits `FeedStale`, which triggers a Discord alert.
+- `PolygonFeed` (`I:SPX`, `I:TNX`) is v1 code, never verified (no key), and slated for removal.
 
-Three calls, all with structured output enforced where the prompt format allows it:
+## 9. Operator inputs (`inputs.py`, `tools/`)
 
-1. `generate_plan(context) -> Plan` — pre-market. Prompt = `prompts/daily_plan.md` + web-fetched context the orchestrator supplies (headlines, calendar, prior-day journal summary). Validate with pydantic; on validation error, one retry with the error message appended; on second failure, alert operator and do not trade.
-   - **Already-printed releases** (`{{RELEASED_DATA}}`): the scheduled 08:00 ET job necessarily runs *before* the classic 08:30 ET prints (CPI/PPI/NFP), so a major catalyst can land after the plan is built but an hour before the open. To fold one in, re-run `python -m agent plan` manually after it prints, passing `--released NAME ACTUAL FORECAST PREVIOUS` (repeatable, for clustered prints like CPI + Core CPI). Surprise is computed in `agent.format_released_data()` via `releases.compute_surprise()` — the same path the automated replan uses — never by the model, per design principle 2. The prompt instructs the model to treat these as authoritative fact already in the price (not an upcoming risk), and to *not* mark such an event `"replan": true` in `scheduled_events`, since there's nothing left to wait for. This is also the manual fallback for intraday releases now that both Finnhub and FMP turned out to be paid-only.
-2. `replan(current_plan, current_tick, reason) -> Plan` — mid-session. Same validation path. Log a diff of old vs new levels to journal + Discord. `reason` is free text describing what changed, so the same call serves both paths: a data release (formatted by `agent.format_release_reason()`) or an operator-described price move.
-   - **Manual mid-session re-plan**: `python -m agent replan [--spx-reference N | --mes-*] [--reason "..."] [--released ...] [--dry-run]`. Loads the plan in force from `state/`, re-plans against it, and rewrites both `state/` and `daily_plans/`. This exists because a morning plan's levels can be invalidated by a large intraday move, with no release involved — and because the automated release path needs a paid econ-calendar API we don't have. `--reason` is optional: omitted, `agent.describe_move()` states the move factually from the plan's own `spx_reference` vs. the price now (computed in code, per principle 2) and explicitly tells the model the cause is unconfirmed, so it doesn't invent a narrative. Supply it when you know something the price delta can't show — a headline, a Fed speaker, order flow.
-   - **How a running `main.py` picks it up**: `run_live()` re-stats `state/plan_<today>.json` every `PLAN_RELOAD_POLL_S` (default 15s) and hot-swaps on mtime change, going through the normal `_load_plan()` → `engine.load_plan()` path. **This is why the manual command rewrites the plan file rather than restarting anything**: `engine.load_plan()`'s hot-swap rules preserve FIRED/OPEN state for triggers present in both plans, so a live position keeps its stop monitoring across the swap, and an OPEN trigger dropped by the new plan raises `ReviewRequired` instead of being silently discarded. A half-written file that fails to parse is ignored (the next poll retries) rather than clobbering the plan in force. Covered by `tests/test_plan_reload.py`.
-3. `decide(trigger, plan, market_context) -> Decision` — when a trigger fires. `Decision = {action: Literal["EXECUTE","SKIP","WAIT"], reasoning: str, confidence: int}`. **The decision cannot alter levels or size** — it only gates the pre-planned action. `WAIT` re-arms the trigger with a 5-min cooldown.
+- **10Y yield:**
+  - Entered by hand only.
+  - `normalize_yield()` scales TNX-style values (above 20, divided by 10) and rejects anything outside 0.5-15%.
+  - Expires after 20 minutes.
+  - "Falling/rising" doesn't work on sparse manual readings, so plans use the level checks: ≤4.95 supportive, ≥5.15 bearish, 5.00 pivot.
+- **GEX:** from Moomoo app → `.SPX` → Options → Analysis → Gamma Exposure, with **Expiration = today**.
+  - `set_gex.py` rejects any other expiry unless `--allow-other-expiry` is passed.
+  - `--as-of HH:MM` is the screenshot's clock time, in SGT by default. A future time rolls back one day.
+  - It prints what changed and `REGIME CHANGE` when SPX crosses the flip.
+  - Regime: SPX below the flip is negative gamma (moves extend); above it is positive gamma (pinning). Max pain is low weight.
+- **[planned]:** Discord `!yield 4.93` and GEX image intake; an optional OCR screen reader writing `yield.json` with `source: "ocr"`.
 
-Model: `claude-sonnet-4-6` for `decide` (latency), operator's choice for plan generation (both configured via `.env`, no code change needed to swap). Timeouts, enforced by wrapping the SDK's async call in `asyncio.wait_for(...)` (since `ClaudeAgentOptions` has no direct request-timeout field): 30s `decide` (no tools, pure completion — the original spec'd figure holds up), 600s `generate_plan` / 300s `replan` (both run live `WebSearch` for GEX/news/sentiment; a real `daily_plan.md` call measured ~382s end-to-end via the Agent SDK, so the originally spec'd 120s was too tight for that research depth — sized with headroom above the observed run). On timeout/error in `decide`: default to `SKIP` + alert (fail-closed).
+## 10. Plan installation (`tools/write_plan.py`)
 
-Effort (`PLAN_EFFORT` / `DECIDE_EFFORT` in `.env`, mapped to `ClaudeAgentOptions.effort`) is deliberately **separate per call site**, because the two want opposite things: `decide` is a constrained 3-way gate with all context pre-supplied on a fail-closed 30s timeout, so low effort suits it; `generate_plan`/`replan` do the live research that sets every level the engine trades against all day, so lower effort there means fewer searches and shallower analysis — the last place to economize. Blank = the model's own default. Measured on `claude-opus-5`: `decide` at `effort=low` ran **10.3s** vs. the 17–35s range previously seen on `claude-sonnet-4-6` at default effort (one of which breached the 30s timeout and fail-closed to SKIP — see `journal.db` decisions rows 6–10), with reasoning quality preserved (still cites the actual price/stop/invalidation numbers).
+Pipeline: the analysis is shown in chat and saved to `analyses/<date>.md`, Claude drafts the JSON, and `write_plan.py` validates and installs it.
 
-## Scheduler (`scheduler.py`)
+`write_plan.py`:
+- stamps `date` and `generated_at`
+- validates the plan against the schema
+- **grounding:** every price or yield level must appear as a number in the analysis (thousands separators are ignored; sizes and scale-out percentages are exempt)
+- rejects `flat_by` later than 15:30
+- refuses to replace today's plan without `--replan`
+- writes `state/` and `daily_plans/` atomically and prints one line per trigger
 
-APScheduler `AsyncIOScheduler`, timezone `America/New_York`:
+## 11. `decide()` (`agent.py`)
 
-- 08:00 ET Mon–Fri: `generate_plan` job.
-- Per `scheduled_events` in the plan: job at release time + 5s — `releases.poll_and_replan`.
-- 15:00 ET: flat-by check (the entry cutoff itself is enforced in real time by `risk.gate_execute()` at the EXECUTE tap — see Risk/Notify below — not by a scheduled job).
-- 16:05 ET: end-of-day journal summary — Discord.
+- **Transport:** Claude Agent SDK on the operator's subscription (`claude login`). `ANTHROPIC_API_KEY` is scrubbed from the environment. No tools.
+- **Output:** forced JSON schema `{action: EXECUTE | SKIP | WAIT, reasoning, confidence 0-100}`.
+- **Model and limits:** `DECIDE_MODEL` (default `claude-sonnet-5-5`), `DECIDE_EFFORT`, 30 s timeout. Any error or invalid output becomes SKIP.
+- **Prompt:** `prompts/decide.md`. Context: the trigger JSON, bias, invalidation, other trigger statuses, spot, ET and SGT time, the 10Y and its direction, and the notes (§7).
+- **[planned]** add to the context:
+  - the day's analysis write-up and levels table
+  - the trading rules
+  - recent 5-minute bars
+  - VIX
 
-## Releases (`releases.py`)
+## 12. Risk (`risk.py`)
 
-- `poll(source_id) -> ReleaseResult`: hit econ calendar API (Finnhub `/calendar/economic` or FMP equivalent — pick one, config-driven) in a loop: 2s interval, 90s max, until `actual` is non-null for the matching event. Return `{release, actual, forecast, previous, surprise}`.
-- On success — `agent.replan(...)` — validate — `engine.load_plan(new_plan)` — Discord summary with old→new level diff.
-- On timeout — alert operator "release data unavailable, plan unchanged."
+`gate_execute(engine, now)` runs at the **EXECUTE tap** and blocks on:
+- the HALT file
+- the daily realized-loss limit (which auto-creates HALT)
+- max open trades (`MAX_OPEN_TRIGGERS`, 1)
+- the 15:00 ET entry cutoff
 
-## Feed (`feed.py`)
+`flat_by` ≤ 15:30 is enforced at plan install.
 
-- Async generator `stream() -> AsyncIterator[Tick]` behind a small `TickSource` interface, so the live source is swappable. `FEED_SOURCE` in `.env` selects it:
-  - `PolygonFeed` (default): Polygon.io indices `I:SPX` websocket, plus `I:TNX` for 10Y yield merged into ticks (carry last-known yield forward). Reconnect with exponential backoff (1s — 60s cap).
-  - `MoomooFeed`: SPX *estimated* over a local Moomoo (Futu) OpenD gateway — requires the Moomoo desktop app running, logged in, with OpenD running locally (`moomoo-api` PyPI package). Confirmed live that Moomoo's OpenAPI rejects subscribing to US indices outright ("US stock indices are not supported" — a platform restriction, not a code-string issue), so it subscribes to SPY (the ETF, confirmed live) and scales by a ratio calibrated against a known-good SPX reference (`MoomooFeed.calibrate()`, called by `main.py` from each loaded plan's `spx_reference` — refreshes on every daily plan/replan rather than drifting for the life of a long-running process; `MOOMOO_SPY_SPX_RATIO` is only the pre-calibration initial guess). Bridges the SDK's thread-based push callback (`StockQuoteHandlerBase.on_recv_rsp`, confirmed fired on its own child thread) into the asyncio stream via a thread-safe queue. No 10Y yield support — `yield_10y` is always `None`; conditions requiring `yields_10y` simply never fire, per triggers.py's existing fail-closed behavior on missing yield data.
-- **Dead-man rule** (`FeedManager`, source-agnostic): during RTH, no tick for >10s — emit `FeedStale` event — notify + engine treats as HALT for new entries.
-- **Pre-market SPX reference for `agent.py`'s CLI**: SPX itself has no live pre-market print (it's computed from constituent trades, most of which aren't liquid pre-market — confirmed live, `.SPX` just repeats the prior close before 09:30). MESmain futures do trade pre-market, so `python -m agent plan` accepts `--mes-current`/`--mes-prev-close`/`--spx-prev-close` as an alternative to `--spx-reference`: derives `spx_reference = mes_current + (spx_prev_close - mes_prev_close)` — the same basis-adjustment a trader does by hand, computed once as plain deterministic arithmetic, never by the LLM. MES/ES futures were considered for the *live tick feed* too but rejected for now — Moomoo's OpenAPI gates futures quotes behind a paid "quote card" the operator's account doesn't have (confirmed live); `US.ES` without the `main` suffix looks like it subscribes but silently resolves to an unrelated stock (Eversource Energy) via ticker collision.
+**[planned]:**
+- **Two stops ends the day** (HALT).
+- **Position size capped by VIX tier:** up to 30% below 20, 15-20% at 20-30, about 10% above 30. Needs a VIX input.
+- **A per-trade dollar cap.** The operator hasn't chosen the amount yet.
+- **A soft early-entry block:** the plan sets `no_entries_before`; a trigger before it shows "Early entry — override?"; the override and reason are journaled; trades are tagged early or regular.
 
-## Risk (`risk.py`)
+## 13. Discord (`notify.py`)
 
-`RiskManager.gate_execute(engine, now) -> RiskCheckResult` is the single hard gate, checked in real time at the moment the operator taps **EXECUTE** (`notify.py`'s `_on_interaction`, not at `TriggerFired` time — see Notify below):
+Gateway bot, no inbound ports. Alerts include price, ET and SGT time, the trigger id and the agent's reasoning.
 
-- `state/HALT` file exists — block all new entries, alert once.
-- Daily realized-loss limit (config, e.g. from journal marks) — auto-create HALT.
-- Max simultaneous OPEN triggers: 1 (config).
-- Hard entry cutoff 15:00 ET regardless of plan contents.
+Buttons: EXECUTE (re-checks risk), SKIP, Mark Filled. Stop and target tracking starts only after Mark Filled.
 
-## Notify (`notify.py`)
+**[planned]:**
+- EXECUTE asks for the fill price and opens the trade, replacing Mark Filled.
+- Alerts expire on a time limit or when price is too far from the entry.
+- Stops and invalidations @mention the operator, with a reminder if an alert goes untapped.
+- Inbound `!yield` and screenshots.
 
-- Discord bot over the Gateway (persistent outbound websocket, like Telegram's long-polling — no inbound ports, no public webhook endpoint). Messages: plan summary at 08:05, re-plan diffs, `TriggerFired` with **inline buttons [EXECUTE] [SKIP]** wired to `engine.confirm/skip`, target/stop/invalidation alerts, EOD summary.
-- All alerts include price, time (ET + SGT), trigger id, and the agent's one-line reasoning.
-- **`TriggerFired` always calls `decide()` and always alerts**, even when `risk.gate_execute()` would currently refuse — e.g. past the 15:00 entry cutoff, or with a HALT file present. The operator should never go dark just because a guardrail is active; they still see the trigger, the agent's recommendation, and can act with full context. The hard block is enforced **at the EXECUTE tap itself**: `Notifier` is constructed with the live `RiskManager` (`main.py`'s `start_notifier()`), and `_on_interaction`'s `confirm` branch re-checks `risk.gate_execute(engine, datetime.now(ET))` in real time before calling `engine.confirm()`. If blocked, the tap is refused with the reason edited into the message and `engine.confirm()` never runs — the trigger stays `FIRED` (operator can still tap SKIP). This moves the guardrail from a stale fire-time check to the actual moment of commitment, without weakening it: nothing can execute past cutoff, but nothing goes silent either. Test: `tests/test_notify.py`.
+## 14. Claude Code workspace
 
-## Journal (`journal.py`)
+- `CLAUDE.md` holds the role, file contracts, trading rules and hard rules (never invent levels, never hand-edit `state/`, never read `.env`, replans need the operator's OK).
+- **Commands** (`.claude/commands/`):
+  - `premarket.md`: context → GEX → skill analysis shown in chat → `analyses/` → draft JSON → `write_plan.py` → trigger list
+  - `intraday.md`: record inputs first → skill read → replan only on a changed bias and the operator's yes
+  - `eod.md`: skill → new `context/context_<date>.md`; lessons only with the operator's confirmation
+- The skills are repo copies of the operator's claude.ai skills (`spx-premarket-analysis`, `spx-intraday-read`, `spx-context-update`). **The repo copy is the master**, and claude.ai edits must be copied over.
 
-SQLite (aiosqlite). Tables: `plans` (full JSON, generated_at, trigger source), `events` (every EngineEvent), `decisions` (trigger id, agent action, reasoning, confidence, operator response, latency), `releases`. This is the accountability layer — every decision must be reconstructable.
+## 15. Config (`.env`, see `.env.example`)
 
-## Replay harness (`replay.py`)
+| Group | Settings |
+|---|---|
+| Discord | `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID` |
+| Feed | `FEED_SOURCE=moomoo`, `MOOMOO_HOST`, `MOOMOO_PORT`, `MOOMOO_SPY_CODE`, `MOOMOO_SPY_SPX_RATIO` (initial guess) |
+| Risk | `DAILY_LOSS_LIMIT_USD`, `MAX_OPEN_TRIGGERS` |
+| Model | `DECIDE_MODEL`, `PLAN_MODEL`, `DECIDE_EFFORT`, `PLAN_EFFORT` |
+| v2 inputs | `YIELD_MAX_AGE_MIN` (20), `GEX_MAX_AGE_MIN` (90), `SPX_ESTIMATE_DRIFT_WARN_PTS` (2), `INPUT_POLL_S` (5), `PLAN_AUTOGEN` (false) |
+| v1, slated for removal | `POLYGON_*`, `FINNHUB_*`, `YIELD_WINDOW_MIN`, `YIELD_EPSILON` |
 
-- `python replay.py --plan state/plan_2026-07-01.json --ticks tests/fixtures/ticks_sample.csv [--speed 0|60x]`
-- CSV columns: `ts_et,price,yield_10y`. Feeds ticks through the real `TriggerEngine`, prints events, writes to a throwaway journal. Auto-decisions stubbed (`decide` mocked to EXECUTE) unless `--interactive`.
-- Include a fixture reproducing the 2026-07-01 ISM scenario: pre-market 7465 → 7480 post-release → dip to 7468 (fires primary_long) → run to 7499 (target 1) etc.
+## 16. Testing
 
----
-
-## Milestones (implement in this order)
-
-1. **M1 — Core, offline**: `schema.py`, `triggers.py`, `replay.py`, tests. Exit criteria: replay of the ISM fixture produces the expected event sequence; `pytest` green; gap-through and hot-swap cases covered.
-2. **M2 — Agent + prompts**: `agent.py` with validated structured output; `prompts/` populated (adapt operator's existing daily prompt to demand the JSON block); plan generation runnable standalone: `python -m agent plan`.
-3. **M3 — Live loop, alerts-only**: `feed.py`, `scheduler.py`, `releases.py`, `notify.py`, `risk.py`, `journal.py`, `main.py`. Paper-watch for ≥2 weeks.
-   - Implemented. `main.py --sim` (feed -> engine -> `agent.decide()` -> journal, no Discord) verified live against the M1 ISM fixture: a real trigger fire produced a well-reasoned `decide()` call, correctly journaled, and correctly did **not** auto-advance to OPEN/target/stop monitoring — that requires an operator's Discord tap (`confirm`/`mark_filled`), which is by design.
-   - `notify.py` was swapped from Telegram to Discord after initial M3 implementation — same shape (Gateway bot, no inbound ports, inline buttons via components/interactions instead of Telegram's `InlineKeyboardButton`/`CallbackQueryHandler`), a contained rewrite since `main.py` only calls `notify.py`'s methods.
-   - **Not yet verified live**: the Discord-integrated path (`notify.py`'s inline buttons actually calling `engine.confirm/skip/mark_filled`) — needs a real bot token/channel id; `feed.py`'s `PolygonFeed` websocket — needs a Polygon key and RTH; `scheduler.py`'s cron jobs and a real `releases.py` poll against a live econ print. See `ROLLOUT_PLAN.md` Step 4.
-4. **M4 (later, separate approval)**: broker integration (Tradier sandbox first), position marks, auto scale-outs.
-
-## Config (`.env.example`)
-
-```
-# agent.py authenticates via `claude login` (Claude subscription) — no
-# ANTHROPIC_API_KEY here on purpose, see agent.py.
-POLYGON_API_KEY=
-FINNHUB_API_KEY=
-DISCORD_BOT_TOKEN=
-DISCORD_CHANNEL_ID=
-FEED_SOURCE=polygon
-MOOMOO_HOST=127.0.0.1
-MOOMOO_PORT=11111
-MOOMOO_SPY_CODE=US.SPY
-MOOMOO_SPY_SPX_RATIO=10.06
-DAILY_LOSS_LIMIT_USD=1000
-MAX_OPEN_TRIGGERS=1
-YIELD_WINDOW_MIN=5
-YIELD_EPSILON=0.005
-DECIDE_MODEL=claude-sonnet-4-6
-PLAN_MODEL=claude-sonnet-4-6
-```
-
-## Testing requirements
-
-- `test_schema.py`: validator rejections (stop on wrong side, scale-out ≠ 100, dangling `requires_not_filled`).
-- `test_triggers.py`: zone entry debounce; one-shot; `requires_not_filled` gating; yield fail-closed; gap-through stop; invalidation halts new fires; hot-swap preserves OPEN, emits ReviewRequired on removed-OPEN; `not_after` expiry; WAIT cooldown re-arm; `load_plan()` clears invalidation and reports it.
-- No test may require network access.
+- Run with `.venv/Scripts/python.exe -m pytest -q`. 90 tests at the end of milestone 1.
+- `tests/test_v2_inputs.py` covers the v2 inputs, yield-level conditions, calibration, `write_plan`/`set_gex`, and the poller, reminder and `decide()` notes.
+- Each engine change needs replay-style tests through the real `TriggerEngine`. Each new rule needs a test that shows it **blocking**, not only one that shows it passing.

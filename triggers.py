@@ -301,6 +301,31 @@ class TriggerEngine:
             if direction != cond.yields_10y:
                 return False
 
+        if cond.yield_below is not None or cond.yield_above is not None:
+            # Level checks use the yield carried on this tick — main.py only
+            # attaches a manual yield while it is fresh, so None here means
+            # missing or expired. Fail closed, as with yields_10y.
+            y = tick.yield_10y
+            if y is None:
+                if not state.warned_no_yield:
+                    state.warned_no_yield = True
+                    events.append(
+                        EngineWarning(
+                            message=(
+                                f"trigger {trigger.id!r} has a yield level condition "
+                                f"but no fresh 10Y yield is available; failing closed"
+                            ),
+                            trigger_id=trigger.id,
+                            tick=tick,
+                        )
+                    )
+                return False
+            state.warned_no_yield = False
+            if cond.yield_below is not None and not y <= cond.yield_below:
+                return False
+            if cond.yield_above is not None and not y >= cond.yield_above:
+                return False
+
         if self._has_price_condition(trigger):
             in_zone = self._in_zone(trigger, tick.price)
             was_in_zone = state.was_in_zone

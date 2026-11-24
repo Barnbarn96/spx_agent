@@ -37,6 +37,11 @@ class Condition(BaseModel):
     price_above: float | None = None
     price_below: float | None = None
     yields_10y: Literal["falling", "rising"] | None = None
+    # v2: level checks on the 10-year yield, in percent (e.g. 4.95). These
+    # work with sparse manual input (state/yield.json), unlike yields_10y's
+    # rolling-window direction which needs a live yield stream.
+    yield_below: float | None = None
+    yield_above: float | None = None
     not_before: str | None = None
     not_after: str | None = None
     requires_not_filled: list[str] = Field(default_factory=list)
@@ -53,6 +58,19 @@ class Condition(BaseModel):
             _validate_hhmm(self.not_before)
         if self.not_after is not None:
             _validate_hhmm(self.not_after)
+        for name in ("yield_below", "yield_above"):
+            value = getattr(self, name)
+            if value is not None and not 0.5 <= value <= 15:
+                raise ValueError(f"{name} must be a yield in percent (e.g. 4.95), got {value}")
+        if (
+            self.yield_below is not None
+            and self.yield_above is not None
+            and not self.yield_above < self.yield_below
+        ):
+            raise ValueError(
+                f"yield_above ({self.yield_above}) must be < yield_below ({self.yield_below}) "
+                "when both are set"
+            )
         return self
 
 
@@ -154,6 +172,13 @@ class Plan(BaseModel):
     generated_at: datetime
     bias: Literal["bullish", "bearish", "neutral"]
     spx_reference: float
+    # v2: where spx_reference came from, e.g. "spreadex 7250 @ 09:27 ET" or
+    # "mes-derived". Informational only.
+    spx_reference_source: str = ""
+    # v2: the previous session's official SPX close. When set, the Moomoo
+    # feed calibrates its SPY->SPX ratio as spx_prev_close / SPY's previous
+    # close (two official 4 PM prints) instead of against spx_reference.
+    spx_prev_close: float | None = None
     triggers: list[Trigger] = Field(min_length=1)
     invalidation: Invalidation
     flat_by: str
