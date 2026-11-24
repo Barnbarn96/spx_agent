@@ -84,6 +84,9 @@ REPLAN_TIMEOUT_S = 300
 
 STATE_DIR = os.environ.get("STATE_DIR", "state")
 DAILY_PLANS_DIR = os.environ.get("DAILY_PLANS_DIR", "daily_plans")
+# v2: /premarket's write-ups (analyses/<date>.md), read into decide()'s context
+ANALYSES_DIR = os.environ.get("ANALYSES_DIR", "analyses")
+TRADING_RULES_PATH = os.environ.get("TRADING_RULES_PATH", "CLAUDE.md")
 JOURNAL_DB_PATH = os.path.join(STATE_DIR, "journal.db")
 HALT_FILE_PATH = os.path.join(STATE_DIR, "HALT")
 

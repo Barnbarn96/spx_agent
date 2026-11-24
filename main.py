@@ -31,6 +31,7 @@ import releases
 from feed import FeedManager, FeedStale, MoomooFeed, PolygonFeed, ReplayTickSource, TickSource
 from journal import JournalDB
 from replay import load_ticks
+import decide_context
 from risk import RiskManager, is_early
 from schema import (
     AlreadyInZone,
@@ -415,6 +416,10 @@ class Orchestrator:
                 tid: s.status.value for tid, s in self.engine.states.items() if tid != event.trigger_id
             },
             "notes": self._decide_notes(event.tick),
+            # v2: ground the call in the day's plan, the rules and recent price action
+            "analysis": decide_context.load_analysis(config.ANALYSES_DIR, self.plan.date.isoformat()),
+            "trading_rules": decide_context.load_trading_rules(config.TRADING_RULES_PATH),
+            "recent_closes": decide_context.format_closes(self.engine.recent_closes("5m", 6)),
         }
 
         start = time.monotonic()

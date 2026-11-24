@@ -246,9 +246,8 @@ async def replan(current_plan: Plan, current_tick: Tick, reason: str) -> Plan:
     )
 
 
-async def decide(trigger: Trigger, plan: Plan, market_context: dict) -> Decision:
-    """Gate a fired trigger's pre-planned action. Fails closed to SKIP on
-    any timeout or SDK error. No tools — this is a pure decision call."""
+def build_decide_prompt(trigger: Trigger, plan: Plan, market_context: dict) -> str:
+    """prompts/decide.md filled in for one fired trigger."""
     template = (PROMPTS_DIR / "decide.md").read_text(encoding="utf-8")
     context = {
         "TRIGGER_JSON": trigger.model_dump_json(indent=2),
@@ -261,8 +260,17 @@ async def decide(trigger: Trigger, plan: Plan, market_context: dict) -> Decision
         "YIELD_10Y": str(market_context.get("yield_10y", "n/a")),
         "YIELD_DIRECTION": str(market_context.get("yield_direction", "n/a")),
         "MARKET_CONTEXT": str(market_context.get("notes", "n/a")),
+        "ANALYSIS": str(market_context.get("analysis", "(not provided)")),
+        "TRADING_RULES": str(market_context.get("trading_rules", "(not provided)")),
+        "RECENT_CLOSES": str(market_context.get("recent_closes", "(not provided)")),
     }
-    filled = _fill_template(template, context)
+    return _fill_template(template, context)
+
+
+async def decide(trigger: Trigger, plan: Plan, market_context: dict) -> Decision:
+    """Gate a fired trigger's pre-planned action. Fails closed to SKIP on
+    any timeout or SDK error. No tools — this is a pure decision call."""
+    filled = build_decide_prompt(trigger, plan, market_context)
 
     options = ClaudeAgentOptions(
         model=config.DECIDE_MODEL,

@@ -45,6 +45,7 @@ The two halves only share files under `state/`:
 - Tests: `.venv/Scripts/python.exe -m pytest -q`
 - Watcher: `.venv/Scripts/python.exe main.py` (in its own terminal; leave it running).
 - Discord check: `.venv/Scripts/python.exe tools/discord_ping.py` sends one test message and prints the exact reason if it fails.
+- decide() check: `.venv/Scripts/python.exe tools/try_decide.py` runs one real decide() with the full context (`--print-prompt` to see the prompt only).
 - Plan schema: `.venv/Scripts/python.exe tools/write_plan.py --schema`; worked example: `--example` (built from the Nov 23 analysis in `tests/fixtures/`).
 
 ## Trigger features (see `/premarket` for how to map write-up wording)

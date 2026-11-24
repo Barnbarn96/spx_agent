@@ -244,10 +244,12 @@ Pipeline: the analysis is shown in chat and saved to `analyses/<date>.md`, Claud
 - **Output:** forced JSON schema `{action: EXECUTE | SKIP | WAIT, reasoning, confidence 0-100}`.
 - **Model and limits:** `DECIDE_MODEL` (default `claude-sonnet-5-5`), `DECIDE_EFFORT`, 30 s timeout. Any error or invalid output becomes SKIP.
 - **Prompt:** `prompts/decide.md`. Context: the trigger JSON, bias, invalidation, other trigger statuses, spot, ET and SGT time, the 10Y and its direction, and the notes (§7).
-- **[planned]** add to the context:
-  - the day's analysis write-up and levels table
-  - the trading rules
-  - recent 5-minute bars
+- **v2 context (`decide_context.py`):**
+  - `analyses/<plan date>.md` (`ANALYSES_DIR`), trimmed: the sections whose heading mentions levels, must-hold, resistance, scenario(s) or trade bias, then the **latest** "Intraday update" section only. The disclaimer line is dropped; capped at 6,000 characters. A missing file says so instead.
+  - The "## Trading rules" section of `CLAUDE.md` (`TRADING_RULES_PATH`).
+  - The last six completed 5-minute closes, labelled by bar start in ET (`TriggerEngine.recent_closes()`; the engine keeps 24 per timeframe, not persisted across restarts).
+  - `prompts/decide.md` tells the model how to use each (don't chase into a level, want confirmation in the closes, prefer the latest intraday bias, don't skip on rules the code already enforces) and to name the level or close it relied on.
+- **Hand test:** `tools/try_decide.py` builds the same context (defaults: the Nov 23 example, `buy_dip` at 7205, synthetic closes) and calls the real `decide()`; `--print-prompt` shows the prompt without calling the model. The prompt is built by `agent.build_decide_prompt()`.
 
 ## 12. Risk (`risk.py`)
 

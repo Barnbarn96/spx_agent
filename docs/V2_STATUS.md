@@ -9,7 +9,7 @@
 | Last updated | 2026-11-24 |
 | Branch | `release-v2` (from `release-v1` @ `f867349`) |
 | Commits so far | `fd68343` milestone 1 → `6d2d208` engine fixes → `16f1219` trigger types → two stops ends the day |
-| Tests | **205 passing**: `.venv/Scripts/python.exe -m pytest -q` |
+| Tests | **221 passing**: `.venv/Scripts/python.exe -m pytest -q` |
 | Live verification of v2 | **None yet.** Everything is unit-tested and replay-tested only. |
 
 **When you finish a task:**
@@ -32,15 +32,7 @@ Ground rules for every task:
 
 ### 1a. Ready to build now
 
-**1. `decide()` gets the real context** (`main.py` `_decide_notes`, `prompts/decide.md`)
-- Add:
-  - the day's `analyses/<date>.md`: at least the levels table, scenarios and trade bias, trimmed to a sensible size
-  - the trading rules section of CLAUDE.md
-  - the last six 5-minute bar closes (the engine already builds bars; expose them)
-- Update `prompts/decide.md` to tell the model how to use them. Keep the 30 s timeout and the default to SKIP.
-- *Done when:* a test asserts the notes contain the levels table and recent closes. Then run one real `decide()` by hand and check the reasoning cites them.
-
-**2. Feed polish** (`feed.py`)
+**1. Feed polish** (`feed.py`)
 - Don't recalibrate between 9:30 and 9:35 ET.
 - SPY ex-dividend days: allow a manual `--spy-dividend` / env override that's added back to SPY's previous close for that day.
 - Optional, with the operator's OK: recalibrate from a fresh GEX screenshot's `spx_in_shot` when drift is above 2 points.
@@ -99,6 +91,13 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 ---
 
 ## 4. Done
+
+**`decide()` gets the real context (11-24)**
+- `decide_context.py`: `analysis_excerpt()` / `load_analysis()`, `load_trading_rules()`, `format_closes()`. `TriggerEngine.recent_closes()`.
+- `main.py` adds `analysis`, `trading_rules`, `recent_closes` to the decide context; `agent.py` fills `{{ANALYSIS}}`, `{{TRADING_RULES}}`, `{{RECENT_CLOSES}}` (prompt built by `build_decide_prompt()`); `prompts/decide.md` says how to use them. Still 30 s, still SKIP on any failure.
+- `tools/try_decide.py` for the hand test. `ANALYSES_DIR`, `TRADING_RULES_PATH` in `config.py`.
+- Tests: `tests/test_v2_decide_context.py` (19).
+- **Not done here:** the real model call. The cloud session has no Claude login; the operator runs `tools/try_decide.py` (§7).
 
 **A replan keeps `first_touch` counts (11-24)**
 - `TriggerEngine.load_plan`: a re-armed trigger with the same id and an unchanged price condition (`_same_zone`) carries `touches` and `in_zone_last_tick`. A moved zone starts at 0.
@@ -198,6 +197,7 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 - [ ] Early entry: with a plan whose `no_entries_before` is in the future, an alert shows "Early entry — override?"; tapping it opens the reason box; submitting confirms and the reason appears in the message.
 - [ ] Alert expiry: leave an alert untapped for 10+ minutes and the "ALERT EXPIRED" notice appears; tapping EXECUTE on it then says Ignored (SKIPPED).
 - [ ] @mentions: with `DISCORD_MENTION_USER_ID` set, a TRIGGER FIRED alert pings your phone, and an untapped one gets one REMINDER at 5 min.
+- [ ] `tools/try_decide.py` returns a decision whose reasoning names a level from the write-up or one of the closes (try the default, then `--trigger breakout_long --price 7262 --closes 7240,7248,7255,7258,7261,7263`).
 - [ ] Two stops in one day: the 2nd posts the HALT notice and `state/HALT` exists; EXECUTE on a later alert is refused. Delete `state/HALT` by hand to resume.
 - [ ] From v1, still unverified: continuous RTH ticks, reconnect with backoff, the dead-man rule (`docs/v1/ROLLOUT_PLAN.md` Step 4).
 

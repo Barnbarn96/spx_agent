@@ -135,6 +135,11 @@ class TriggerEngine:
         self._bar_bucket: dict[str, tuple] = {}
         self._bar_last: dict[str, float] = {}
         self._closed: dict[str, float | None] = {}
+        # v2: recent completed bars per timeframe, (bar start "HH:MM" ET, close),
+        # for decide()'s context. Not persisted: a restart starts empty.
+        self._recent_closes: dict[str, deque[tuple[str, float]]] = {
+            tf: deque(maxlen=24) for tf in _TIMEFRAMES
+        }
 
     # -- operator actions ---------------------------------------------
 
@@ -609,6 +614,10 @@ class TriggerEngine:
 
     # -- bars (v2) -------------------------------------------------------
 
+    def recent_closes(self, timeframe: str = "5m", n: int = 6) -> list[tuple[str, float]]:
+        """The last n completed bars as (bar start HH:MM ET, close), oldest first."""
+        return list(self._recent_closes[timeframe])[-n:]
+
     def _update_bars(self, tick: Tick) -> None:
         """Clock-aligned 1m/5m bars in ET, built from ticks. Sets
         self._closed[tf] to the previous bar's close on the first tick of a
@@ -619,6 +628,8 @@ class TriggerEngine:
             bucket = (local.date(), local.hour, local.minute - local.minute % minutes)
             current = self._bar_bucket.get(tf)
             self._closed[tf] = self._bar_last[tf] if current is not None and bucket != current else None
+            if self._closed[tf] is not None:
+                self._recent_closes[tf].append((f"{current[1]:02d}:{current[2]:02d}", self._closed[tf]))
             self._bar_bucket[tf] = bucket
             self._bar_last[tf] = tick.price
 
