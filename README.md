@@ -32,8 +32,17 @@ What changed from v1:
 - the SPY->SPX ratio comes from the previous closes (`spx_prev_close` in the plan)
 - yield-level trigger conditions (`yield_below` / `yield_above`)
 - GEX input and a check of the SPX estimate against the screenshot price
-- `decide()` gets yield, GEX and plan notes
+- `decide()` gets yield, GEX and plan notes, and runs in the background
 - inputs are polled on a timer instead of on ticks
+- trigger types:
+  - 5-minute close / hold confirmation, direction of approach, first touch
+  - breakeven stop after TP1
+  - optional stops on a bar close
+- no firing on a jump through a zone or on price already in a zone
+- trigger state survives a restart of `main.py`
+
+**Working on the code?** Read [SPEC.md](SPEC.md), then
+[docs/V2_STATUS.md](docs/V2_STATUS.md). Its §1 is the ordered to-do list.
 
 The rest of this README describes v1.
 

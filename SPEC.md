@@ -254,7 +254,7 @@ Pipeline: the analysis is shown in chat and saved to `analyses/<date>.md`, Claud
 
 `gate_execute(engine, now)` runs at the **EXECUTE tap** and blocks on:
 - the HALT file
-- the daily realized-loss limit (which auto-creates HALT)
+- the daily realized-loss limit (which auto-creates HALT). **Inert today:** nothing feeds `record_realized_pnl()` in production (V2_STATUS 1b-3).
 - max open trades (`MAX_OPEN_TRIGGERS`, 1)
 - the 15:00 ET entry cutoff
 
@@ -302,6 +302,7 @@ Buttons: EXECUTE (re-checks risk), SKIP, Mark Filled. Stop and target tracking s
 
 ## 16. Testing
 
-- Run with `.venv/Scripts/python.exe -m pytest -q`. 90 tests at the end of milestone 1.
+- Run with `.venv/Scripts/python.exe -m pytest -q`. 130 tests as of `16f1219`.
+- **Engine replay check:** the 07-01 fixture must give `zone_skipped` at 7480, then a fire at 7468 and three targets. See V2_STATUS §6 for the exact command.
 - `tests/test_v2_inputs.py` covers the v2 inputs, yield-level conditions, calibration, `write_plan`/`set_gex`, and the poller, reminder and `decide()` notes.
 - Each engine change needs replay-style tests through the real `TriggerEngine`. Each new rule needs a test that shows it **blocking**, not only one that shows it passing.
