@@ -9,7 +9,7 @@
 | Last updated | 2026-11-24 |
 | Branch | `release-v2` (from `release-v1` @ `f867349`) |
 | Commits so far | `fd68343` milestone 1 → `6d2d208` engine fixes → `16f1219` trigger types → two stops ends the day |
-| Tests | **198 passing**: `.venv/Scripts/python.exe -m pytest -q` |
+| Tests | **205 passing**: `.venv/Scripts/python.exe -m pytest -q` |
 | Live verification of v2 | **None yet.** Everything is unit-tested and replay-tested only. |
 
 **When you finish a task:**
@@ -32,13 +32,7 @@ Ground rules for every task:
 
 ### 1a. Ready to build now
 
-**1. A replan keeps `first_touch` counts** (`triggers.py`)
-- Today `load_plan` creates a fresh `TriggerState`, so a replan resets `touches`. A `first_touch` trigger that survives a replan unchanged could then fire on a second touch, against the "fade the first touch" rule.
-- Replans happen through `/intraday` when a data or GEX screenshot changes the bias, so this is a real path.
-- In `TriggerEngine.load_plan`, carry `touches` (and the first-sight flag) over when the trigger id **and** its `price_between` zone are unchanged. A changed zone starts fresh.
-- *Done when:* engine tests show a touch, a replan with the same id and zone, then a second touch **not** firing; and a replan with a moved zone firing on its first touch.
-
-**2. `decide()` gets the real context** (`main.py` `_decide_notes`, `prompts/decide.md`)
+**1. `decide()` gets the real context** (`main.py` `_decide_notes`, `prompts/decide.md`)
 - Add:
   - the day's `analyses/<date>.md`: at least the levels table, scenarios and trade bias, trimmed to a sensible size
   - the trading rules section of CLAUDE.md
@@ -46,7 +40,7 @@ Ground rules for every task:
 - Update `prompts/decide.md` to tell the model how to use them. Keep the 30 s timeout and the default to SKIP.
 - *Done when:* a test asserts the notes contain the levels table and recent closes. Then run one real `decide()` by hand and check the reasoning cites them.
 
-**3. Feed polish** (`feed.py`)
+**2. Feed polish** (`feed.py`)
 - Don't recalibrate between 9:30 and 9:35 ET.
 - SPY ex-dividend days: allow a manual `--spy-dividend` / env override that's added back to SPY's previous close for that day.
 - Optional, with the operator's OK: recalibrate from a fresh GEX screenshot's `spx_in_shot` when drift is above 2 points.
@@ -99,12 +93,17 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 | 11-24 | **No VIX source in code.** VIX tiers and the VIX > 30 wait live in the `/premarket` write-up, its `size_pct` and its `not_before`. A mid-session VIX spike is handled by an `/intraday` replan. | A code check would duplicate the analysis; the operator sees VIX on screen. |
 | 11-24 | **No realized P&L reporting.** The daily loss limit HALT stays inert on purpose; two stops ends the day is the daily brake. | The operator doesn't want to type P&L. |
 | 11-24 | **Discord is for alerts only.** No `!yield` command and no GEX screenshots in Discord; inputs go through `/intraday` in Claude Code. | One input path, and it's the one that records state and offers replans. |
-| 11-24 | **Replans stay, via `/intraday`** (on a changed bias and the operator's yes). So the replan touch-count gap gets fixed (1a-1). | Adjusting the plan after a data surprise is the point of mid-session screenshots. |
+| 11-24 | **Replans stay, via `/intraday`** (on a changed bias and the operator's yes). So the replan touch-count gap was fixed (§4). | Adjusting the plan after a data surprise is the point of mid-session screenshots. |
 | 11-24 | **Two stops: the count is rebuilt from the journal at startup, and the rebuild never creates the HALT.** Only the stop that reaches the limit does, so a HALT the operator deleted isn't re-created by a restart or a third stop. | The journal already has every `stop_hit`; no new state file. Deleting the HALT is the operator's override. |
 
 ---
 
 ## 4. Done
+
+**A replan keeps `first_touch` counts (11-24)**
+- `TriggerEngine.load_plan`: a re-armed trigger with the same id and an unchanged price condition (`_same_zone`) carries `touches` and `in_zone_last_tick`. A moved zone starts at 0.
+- `_track_touches` now keys off `in_zone_last_tick is None` instead of first sight, so a carried "price was in the zone" doesn't add a touch, and a jump through right after a replan still counts.
+- Tests: `tests/test_v2_replan_touches.py` (7); 3 failed before the fix. The 07-01 replay is unchanged.
 
 **@mentions and the untapped-alert reminder (11-24)**
 - `DISCORD_MENTION_USER_ID` and `ALERT_REMIND_MIN` (5) in `config.py` and `.env.example`.
@@ -174,7 +173,6 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 
 ## 5. Known gaps and risks (not yet tasks, but don't forget them)
 - **The daily loss limit is inert by choice** (§3). Two stops ends the day is the daily brake.
-- **A replan resets touch counts:** now task 1a-1.
 - **Close-confirmed stops have no hard backstop.** A violent move only exits at the next bar close. Consider a "tick stop at stop ± N pts" safety net.
 - **A "stall"/rejection pattern can't be expressed.** Plans say "confirm by eye" in `notes`.
 - **Whether `prev_close_price` is present in Moomoo extended-hours push rows is unverified** (§7). If it isn't, calibration falls back silently except for a log line.

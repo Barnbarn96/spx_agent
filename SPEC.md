@@ -155,7 +155,7 @@ Events: `TriggerFired`, `TargetHit`, `StopHit`, `Invalidated`, `FlatByReached`, 
   - The clock resets when price leaves, and it runs through closed gates.
   - The trigger fires on the first tick with gates open once the dwell is satisfied.
 - **`approach`:** for tick mode, the previous tick must be beyond the zone on that side. For close mode, the previous close. For dwell, the tick before the entry; an entry from the wrong side doesn't start the clock.
-- **`first_touch`:** entries into the zone are counted on tick prices, ignoring gates. Already inside at first sight counts as a touch, and so does a jump through the zone. The trigger fires only while it's on touch #1.
+- **`first_touch`:** entries into the zone are counted on tick prices, ignoring gates. Already inside at first sight counts as a touch, and so does a jump through the zone. The trigger fires only while it's on touch #1. **Across a replan (v2):** a trigger kept with the same id and the same price condition (`price_between` / `price_above` / `price_below`) keeps its touch count and whether price was last inside the zone, so a touch spanning the replan isn't counted twice. Any other change to the zone starts the count at 0. Everything else about a re-armed trigger still starts fresh (first sight, debounce, bars).
 - **`then_stop: breakeven`:**
   - When that target is hit, the stop moves to the entry price (`StopMoved` event). It only ever tightens.
   - Entry = the fire price (the SPX level where the trigger fired). The operator trades off key levels, not the option premium, so no fill price is collected (11-24). `mark_filled(fill_price)` still accepts one if a caller ever passes it.

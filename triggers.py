@@ -101,6 +101,16 @@ class TriggerState:
         return self.stop_override if self.stop_override is not None else self.trigger.stop
 
 
+def _same_zone(a: Trigger, b: Trigger) -> bool:
+    """Same price condition, so touches of one are touches of the other."""
+    ca, cb = a.condition, b.condition
+    return (ca.price_between, ca.price_above, ca.price_below) == (
+        cb.price_between,
+        cb.price_above,
+        cb.price_below,
+    )
+
+
 class TriggerEngine:
     def __init__(
         self,
@@ -184,7 +194,12 @@ class TriggerEngine:
                 old.trigger = t  # new levels apply, status preserved
                 new_states[t.id] = old
             else:
-                new_states[t.id] = TriggerState(trigger=t)
+                fresh = TriggerState(trigger=t)
+                if old is not None and _same_zone(old.trigger, t):
+                    # v2: "first touch" means today's first, replan or not
+                    fresh.touches = old.touches
+                    fresh.in_zone_last_tick = old.in_zone_last_tick
+                new_states[t.id] = fresh
 
         for tid, old in old_states.items():
             if tid in new_ids:
@@ -391,7 +406,7 @@ class TriggerEngine:
         # v2: bookkeeping that must see every tick, gated or not.
         candidate = True
         if has_price:
-            self._track_touches(state, tick, first_observation)
+            self._track_touches(state, tick)
             if mode == "close":
                 candidate = self._close_candidate(state, tick, events, first_observation)
             elif mode == "dwell":
@@ -483,14 +498,18 @@ class TriggerEngine:
         low, high = trigger.condition.price_between
         return prev_price > high if approach == "from_above" else prev_price < low
 
-    def _track_touches(self, state: TriggerState, tick: Tick, first_observation: bool) -> None:
+    def _track_touches(self, state: TriggerState, tick: Tick) -> None:
         """Count entries into the zone (tick prices, ignoring gates) for
         first_touch. Already inside at first sight counts as a touch, and so
         does a jump clean through the zone."""
+        # in_zone_last_tick is None until this trigger's first tick; a replan
+        # with an unchanged zone carries it over (load_plan), so a touch that
+        # spans the replan isn't counted twice.
         in_now = self._in_zone(state.trigger, tick.price)
-        if in_now and (first_observation or not state.in_zone_last_tick):
+        seen_before = state.in_zone_last_tick is not None
+        if in_now and not state.in_zone_last_tick:
             state.touches += 1
-        elif not in_now and not first_observation and self._jumped_through_zone(state.trigger, tick):
+        elif not in_now and seen_before and self._jumped_through_zone(state.trigger, tick):
             state.touches += 1
         state.in_zone_last_tick = in_now
 
