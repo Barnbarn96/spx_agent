@@ -122,6 +122,9 @@ def _in_opening_window(now_et: datetime) -> bool:
     return (now_et.hour, now_et.minute) >= (9, 30) and (now_et.hour, now_et.minute) < (9, 35)
 
 
+_EXTENDED_FIELDS = ("pre_price", "after_price", "overnight_price")
+
+
 def _parse_moomoo_ts(data_date: str, data_time: str) -> datetime:
     combined = f"{data_date} {data_time}"
     for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
@@ -173,6 +176,9 @@ class MoomooFeed(TickSource):
         self._deferred: tuple[float, str] | None = None
         self._last_ts: datetime | None = None
         self.ratio_note = ""
+        # wall clock, replaceable in tests; only used to spot quote rows
+        # left over from the previous session (pre-market / overnight)
+        self._clock = lambda: datetime.now(ET)
         # v2: (ex-dividend date, dollars) for SPY ex-dividend days
         self.spy_dividend: tuple[date_type, float] | None = None
         if config.SPY_DIVIDEND_DATE and config.SPY_DIVIDEND_USD:
@@ -189,7 +195,34 @@ class MoomooFeed(TickSource):
         self._apply_prev_close_ratio()
 
     def _now(self) -> datetime:
-        return self._last_ts or datetime.now(ET)
+        return self._last_ts or self._clock()
+
+    def _stale_session_row(self, row) -> tuple[datetime, float | None, float] | None:
+        """If the quote row is dated before today (ET) and carries an
+        extended-hours price field, return (now, live SPY price, previous
+        close) read the extended-hours way; otherwise None (regular row).
+        The live price is pre_price from 04:00 ET (also used if the row is
+        still stale after 09:30, before the first regular print), else
+        overnight_price. A missing/N/A live price gives None for it."""
+        if not any(k in row for k in _EXTENDED_FIELDS):
+            return None
+        now = self._clock().astimezone(ET)
+        try:
+            row_date = date_type.fromisoformat(str(row.get("data_date", ""))[:10])
+        except ValueError:
+            return None
+        if row_date >= now.date():
+            return None
+        try:
+            prev_close = float(row.get("last_price") or 0)
+        except (TypeError, ValueError):
+            prev_close = 0.0
+        field = "pre_price" if now.hour >= 4 and now.hour < 20 else "overnight_price"
+        try:
+            live = float(row.get(field))
+        except (TypeError, ValueError):
+            live = None
+        return now, (live if live and live > 0 else None), prev_close
 
     def _set_ratio(self, ratio: float, source: str) -> None:
         now = self._now().astimezone(ET)
@@ -245,22 +278,36 @@ class MoomooFeed(TickSource):
             )
 
     def _to_tick(self, row) -> Tick | None:
-        try:
-            spy_price = float(row["last_price"])
-        except (KeyError, TypeError, ValueError):
+        stale = self._stale_session_row(row)
+        if stale is not None:
+            # Pre-market / overnight: the row still describes the last
+            # regular session. Its last_price is that session's close (the
+            # previous close for today's ratio) and the live price is in
+            # the extended-hours field. Confirmed live 2026-11-24 07:31 ET:
+            # data_date 11-23 16:00, last 722.29 (Mon close), prev_close
+            # 689.81 (Fri close), pre_price 714.94.
+            ts, spy_price, prev_close = stale
+        else:
+            try:
+                spy_price = float(row["last_price"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            ts = _parse_moomoo_ts(str(row.get("data_date", "")), str(row.get("data_time", "")))
+            try:
+                prev_close = float(row.get("prev_close_price") or 0)
+            except (TypeError, ValueError):
+                prev_close = 0.0
+        if spy_price is None or spy_price <= 0:
+            # still record the previous close so the ratio is ready
+            if prev_close > 0 and prev_close != self._spy_prev_close:
+                self._spy_prev_close = prev_close
+                self._apply_prev_close_ratio()
             return None
-        if spy_price <= 0:
-            return None
-        ts = _parse_moomoo_ts(str(row.get("data_date", "")), str(row.get("data_time", "")))
         self._last_ts = ts
         if self._deferred is not None and not _in_opening_window(ts.astimezone(ET)):
             self._set_ratio(*self._deferred)
 
         self._last_spy_price = spy_price
-        try:
-            prev_close = float(row.get("prev_close_price") or 0)
-        except (TypeError, ValueError):
-            prev_close = 0.0
         if prev_close > 0 and prev_close != self._spy_prev_close:
             self._spy_prev_close = prev_close
             self._apply_prev_close_ratio()

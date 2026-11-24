@@ -95,6 +95,7 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 **Feed polish (11-24)**
 - `MoomooFeed._set_ratio()`: no ratio change 09:30-09:35 ET once calibrated; held changes apply at 09:35 and show in `ratio_note` (and `decide()`'s notes).
 - SPY ex-dividend: `set_spy_dividend()`, `SPY_DIVIDEND_DATE` / `SPY_DIVIDEND_USD`, `main.py --spy-dividend <USD>` (today only). Subtracted from SPY's previous close on that date.
+- **Pre-market rows fix (11-24):** found live at 07:31 ET: OpenD's pre-market SPY row is the previous session's (last 722.29 = Mon close, prev_close 689.81 = Fri close, live price only in `pre_price`). The old code estimated SPX ≈ 7,578 (frozen) instead of ≈ 7,160, and the correct ratio arriving at 09:30 was held by the opening freeze until 09:35, which could have fired the 5m-close triggers on false prices. `MoomooFeed._stale_session_row()` now reads such rows as previous close = `last_price`, live = `pre_price`/`overnight_price`. Tests: `tests/test_v2_feed_premarket.py`. Checked against the live row: estimate 7,159.12, ratio 10.0198 ("prev closes: SPX 7237.17 / SPY 722.29").
 - Tests: `tests/test_v2_feed_polish.py` (12). Mutation checks: freeze off fails 2, dividend off fails 1.
 
 **`decide()` gets the real context (11-24)**
@@ -192,7 +193,7 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 
 ## 7. Live verification checklist (the operator runs these; record results here)
 - [x] `tools/discord_ping.py` prints "Discord OK" and the message appears in the channel. **Passed 11-24** (operator's PC). Do this first: every Discord item below depends on it.
-- [ ] `main.py` with Moomoo OpenD pre-market: SPY ticks flow, and after a plan with `spx_prev_close` loads, the log or the `decide()` notes show `ratio_source` = **prev closes**.
+- [ ] `main.py` with Moomoo OpenD pre-market: SPY ticks flow, and after a plan with `spx_prev_close` loads, the log or the `decide()` notes show `ratio_source` = **prev closes**. (11-24: the subscription and a one-shot quote work on the operator's PC; the pre-market row shape forced the fix in §4. Still to see: push ticks arriving pre-market with a moving `pre_price`, and no ratio change at 09:30.)
 - [ ] `/premarket <price>` end to end: analysis in chat, `analyses/<date>.md` written, plan installed, `main.py` logs "loaded today's plan", Discord summary posted.
 - [ ] `/intraday 7268 4.93` writes `state/yield.json`, and `main.py` logs "10Y yield updated".
 - [ ] `/intraday` with a GEX screenshot writes `state/gex.json`, shows the changes, and posts the SPX estimate warning when off by more than 2 points.
