@@ -193,7 +193,7 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 - **Plan tooling:** `.venv/Scripts/python.exe tools/write_plan.py tests/fixtures/plan_v2_example.json --analysis tests/fixtures/analysis_2026-11-23.md --date 2026-11-23 --dry-run`. Expect "Plan OK" with 4 triggers.
 
 ## 7. Live verification checklist (the operator runs these; record results here)
-- [ ] `tools/discord_ping.py` prints "Discord OK" and the message appears in the channel. Do this first: every Discord item below depends on it.
+- [x] `tools/discord_ping.py` prints "Discord OK" and the message appears in the channel. **Passed 11-24** (operator's PC). Do this first: every Discord item below depends on it.
 - [ ] `main.py` with Moomoo OpenD pre-market: SPY ticks flow, and after a plan with `spx_prev_close` loads, the log or the `decide()` notes show `ratio_source` = **prev closes**.
 - [ ] `/premarket <price>` end to end: analysis in chat, `analyses/<date>.md` written, plan installed, `main.py` logs "loaded today's plan", Discord summary posted.
 - [ ] `/intraday 7268 4.93` writes `state/yield.json`, and `main.py` logs "10Y yield updated".
