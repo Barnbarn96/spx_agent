@@ -287,9 +287,11 @@ Before the plan's `no_entries_before`, EXECUTE is labelled "Early entry — over
 - An untapped alert is skipped by the input poller once it passes the TTL, with one "ALERT EXPIRED" notice. Distance alone doesn't expire an untapped alert, because price can come back; it's checked on the tap.
 - With no price yet, only the time limit applies. SKIP still works on a stale alert and is journaled as `skip`.
 
-**[planned]:**
-- Stops and invalidations @mention the operator, with a reminder if an alert goes untapped.
-- Inbound `!yield` and screenshots.
+**@mentions (v2):** with `DISCORD_MENTION_USER_ID` set, `send_urgent()` prefixes `<@id>` on: TRIGGER FIRED, STOP HIT, INVALIDATION CROSSED, STOP MOVED, HALT (including two stops), FEED STALE, the untapped-alert REMINDER and ALERT EXPIRED. Target hits, plan summaries, notices and the EOD summary don't mention. Blank = no mentions.
+- **Reminder:** an alert still untapped after `ALERT_REMIND_MIN` (5) gets one REMINDER ("expires in N min"), sent by the input poller. A tap or skip cancels it; a re-fire starts a fresh clock.
+- `main.py` sends STOP MOVED through `Notifier.send_stop_moved()`.
+
+**Not planned (11-24):** inbound `!yield` and screenshots. Discord is for alerts only (§9).
 
 ## 14. Claude Code workspace
 

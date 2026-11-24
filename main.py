@@ -339,10 +339,7 @@ class Orchestrator:
                 f"Not firing outside the zone; it will alert if price comes back into it."
             )
         elif isinstance(event, StopMoved) and self.notifier:
-            await self.notifier.send_text(
-                f"**STOP MOVED** `{event.trigger_id}`: {event.old_stop:g} -> {event.new_stop:g} "
-                f"({event.reason}). Move your stop order to match."
-            )
+            await self.notifier.send_stop_moved(event)
         elif isinstance(event, TargetHit) and self.notifier:
             await self.notifier.send_target_hit(event)
         elif isinstance(event, StopHit):

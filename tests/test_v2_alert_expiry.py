@@ -156,12 +156,12 @@ async def test_untapped_alert_expires_once(journal):
     assert await n.expire_stale_alerts() == ["primary_long"]
     assert engine.states["primary_long"].status == TriggerStatus.SKIPPED
     assert (await decision_row(journal, decision_id))[0] == "expired"
-    notices = [text for text, _ in n.sent]
-    assert len(notices) == 1 and "ALERT EXPIRED" in notices[0] and "primary_long" in notices[0]
+    notices = [text for text, _ in n.sent if "ALERT EXPIRED" in text]
+    assert len(notices) == 1 and "primary_long" in notices[0]
 
     clock.now = at(10, 30)
     assert await n.expire_stale_alerts() == []
-    assert len(n.sent) == 1
+    assert len([t for t, _ in n.sent if "ALERT EXPIRED" in t]) == 1
 
 
 async def test_tapped_alert_is_not_expired_later(journal):

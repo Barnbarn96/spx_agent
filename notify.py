@@ -22,6 +22,7 @@ from schema import (
     Plan,
     ReviewRequired,
     StopHit,
+    StopMoved,
     TargetHit,
     Tick,
     Trigger,
@@ -135,6 +136,10 @@ class Notifier:
         # trigger_id -> when its EXECUTE/SKIP alert was sent (wall clock, so
         # a --sim replay of a past date isn't expired on arrival)
         self._alert_sent_at: dict[str, datetime] = {}
+        # v2 @mentions on urgent alerts, and one reminder per untapped alert
+        self.mention_user_id = config.DISCORD_MENTION_USER_ID
+        self.alert_remind_min = config.ALERT_REMIND_MIN
+        self._reminded: set[str] = set()
 
         intents = discord.Intents.default()
         self.client = discord.Client(intents=intents)
@@ -174,6 +179,12 @@ class Notifier:
         channel = await self._channel()
         return await channel.send(text, view=view)
 
+    async def send_urgent(self, text: str, view: discord.ui.View | None = None) -> None:
+        """send_text with an @mention of the operator in front, if configured."""
+        if self.mention_user_id:
+            text = f"<@{self.mention_user_id}> {text}"
+        await self.send_text(text, view=view)
+
     async def send_plan_summary(self, plan: Plan) -> None:
         lines = [
             f"**Plan {plan.date}** — bias: {plan.bias}, SPX ref: {_fmt_price(plan.spx_reference)}",
@@ -209,6 +220,7 @@ class Notifier:
         self, trigger: Trigger, tick: Tick, decision: Decision, decision_id: int
     ) -> None:
         self.register_decision(trigger.id, decision_id)
+        self._forget_alert(trigger.id)  # a re-fire starts a fresh clock and reminder
         self._alert_sent_at[trigger.id] = self.now_fn()
         text = (
             f"**TRIGGER FIRED: {trigger.id}**\n"
@@ -236,7 +248,7 @@ class Notifier:
                 label="SKIP", style=discord.ButtonStyle.danger, custom_id=f"skip:{trigger.id}"
             )
         )
-        await self.send_text(text, view=view)
+        await self.send_urgent(text, view=view)
 
     async def send_wait_rearmed(self, trigger: Trigger, tick: Tick, decision: Decision) -> None:
         await self.send_text(
@@ -250,13 +262,19 @@ class Notifier:
             f"(scale out {event.scale_out_pct}%) — {_fmt_times(event.tick.ts)}"
         )
 
+    async def send_stop_moved(self, event: StopMoved) -> None:
+        await self.send_urgent(
+            f"**STOP MOVED** `{event.trigger_id}`: {event.old_stop:g} -> {event.new_stop:g} "
+            f"({event.reason}). Move your stop order to match."
+        )
+
     async def send_stop_hit(self, event: StopHit) -> None:
-        await self.send_text(
+        await self.send_urgent(
             f"**STOP HIT: {event.trigger_id}** @ {_fmt_price(event.tick.price)} — {_fmt_times(event.tick.ts)}"
         )
 
     async def send_invalidated(self, event: Invalidated) -> None:
-        await self.send_text(
+        await self.send_urgent(
             f"**INVALIDATION CROSSED** @ {_fmt_price(event.level)} — flatten and halt. "
             f"{_fmt_times(event.tick.ts)}"
         )
@@ -268,13 +286,13 @@ class Notifier:
         await self.send_text(f"**REVIEW REQUIRED: {event.trigger_id}** — {event.reason}")
 
     async def send_feed_stale(self, seconds_since_last_tick: float) -> None:
-        await self.send_text(
+        await self.send_urgent(
             f"**FEED STALE** — no tick for {seconds_since_last_tick:.0f}s during RTH. "
             "Treating as HALT for new entries until the feed recovers."
         )
 
     async def send_halt(self, reason: str) -> None:
-        await self.send_text(f"**HALT** — {reason}")
+        await self.send_urgent(f"**HALT** — {reason}")
 
     async def send_eod_summary(self, text: str) -> None:
         await self.send_text(f"**End-of-day summary**\n{text}")
@@ -333,7 +351,7 @@ class Notifier:
             await interaction.response.edit_message(content=original + "\n\n>> EXECUTE confirmed by operator")
             await self.send_mark_filled_prompt(trigger_id)
         elif action == "skip":  # keeps the fire-time early/regular tag
-            self._alert_sent_at.pop(trigger_id, None)
+            self._forget_alert(trigger_id)
             self.engine.skip(trigger_id)
             decision_id = self._pending_decision_id.get(trigger_id)
             if decision_id is not None and self.journal is not None:
@@ -375,10 +393,14 @@ class Notifier:
                 )
         return None
 
+    def _forget_alert(self, trigger_id: str) -> None:
+        self._alert_sent_at.pop(trigger_id, None)
+        self._reminded.discard(trigger_id)
+
     async def _expire(self, trigger_id: str) -> None:
         """FIRED -> SKIPPED, journaled as "expired"."""
         self.engine.skip(trigger_id)
-        self._alert_sent_at.pop(trigger_id, None)
+        self._forget_alert(trigger_id)
         decision_id = self._pending_decision_id.get(trigger_id)
         if decision_id is not None and self.journal is not None:
             await self.journal.log_operator_response(decision_id, "expired")
@@ -396,9 +418,10 @@ class Notifier:
         return True
 
     async def expire_stale_alerts(self) -> list[str]:
-        """Called from main.py's input poller: an alert left untapped past
-        the TTL is skipped, with one notice. Distance alone doesn't expire an
-        untapped alert (price may come back); it's checked on the tap."""
+        """Called from main.py's input poller. An alert still untapped after
+        ALERT_REMIND_MIN gets one @mention reminder; past the TTL it is
+        skipped, with one notice. Distance alone doesn't expire an untapped
+        alert (price may come back); it's checked on the tap."""
         if self.engine is None:
             return []
         now = self.now_fn()
@@ -406,13 +429,19 @@ class Notifier:
         for trigger_id, sent_at in list(self._alert_sent_at.items()):
             state = self.engine.states.get(trigger_id)
             if state is None or state.status.value != "FIRED":
-                self._alert_sent_at.pop(trigger_id, None)  # tapped, replanned away
+                self._forget_alert(trigger_id)  # tapped, replanned away
                 continue
             age_min = (now - sent_at).total_seconds() / 60
             if age_min <= self.alert_ttl_min:
+                if age_min >= self.alert_remind_min and trigger_id not in self._reminded:
+                    self._reminded.add(trigger_id)
+                    await self.send_urgent(
+                        f"**REMINDER: {trigger_id}** alert untapped for {int(age_min)} min — "
+                        f"expires in {int(self.alert_ttl_min - age_min)} min. Tap EXECUTE or SKIP."
+                    )
                 continue
             await self._expire(trigger_id)
-            await self.send_text(
+            await self.send_urgent(
                 f"**ALERT EXPIRED: {trigger_id}** — untapped for {int(age_min)} min "
                 f"(limit {self.alert_ttl_min:g}). Skipped; no entry. {_fmt_times(now)}"
             )
@@ -420,7 +449,7 @@ class Notifier:
         return expired
 
     async def _confirm(self, trigger_id: str, entry_timing: str, early_reason: str | None) -> None:
-        self._alert_sent_at.pop(trigger_id, None)
+        self._forget_alert(trigger_id)
         self.engine.confirm(trigger_id)
         decision_id = self._pending_decision_id.get(trigger_id)
         if decision_id is not None and self.journal is not None:

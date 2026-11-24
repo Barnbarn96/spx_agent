@@ -16,6 +16,9 @@ POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY", "")
 FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "")
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "")
+# v2: your Discord user ID (Developer Mode > right-click your name > Copy User
+# ID). Urgent alerts start with an @mention of it. Blank = no mentions.
+DISCORD_MENTION_USER_ID = os.environ.get("DISCORD_MENTION_USER_ID", "").strip()
 
 DAILY_LOSS_LIMIT_USD = float(os.environ.get("DAILY_LOSS_LIMIT_USD", "1000"))
 MAX_OPEN_TRIGGERS = int(os.environ.get("MAX_OPEN_TRIGGERS", "1"))
@@ -47,6 +50,8 @@ INPUT_POLL_S = float(os.environ.get("INPUT_POLL_S", "5"))
 # or once SPX is this far from the fire price. Untapped alerts expire too.
 ALERT_TTL_MIN = float(os.environ.get("ALERT_TTL_MIN", "10"))
 ALERT_MAX_DISTANCE_PTS = float(os.environ.get("ALERT_MAX_DISTANCE_PTS", "10"))
+# One @mention reminder when a trigger alert is still untapped after this.
+ALERT_REMIND_MIN = float(os.environ.get("ALERT_REMIND_MIN", "5"))
 # v1 generated a plan automatically at 08:00 ET. In v2 the plan comes from
 # Claude Code's /premarket command, so this is off unless explicitly enabled.
 PLAN_AUTOGEN = os.environ.get("PLAN_AUTOGEN", "false").strip().lower() in ("1", "true", "yes")
