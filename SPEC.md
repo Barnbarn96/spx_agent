@@ -268,6 +268,8 @@ Pipeline: the analysis is shown in chat and saved to `analyses/<date>.md`, Claud
 
 ## 13. Discord (`notify.py`)
 
+**Setup check:** `tools/discord_ping.py` sends one message over the REST API with the `.env` token and channel (no gateway, so `main.py` can keep running) and prints one line: OK, or the reason (token rejected, channel not found, missing View Channel / Send Messages, network or SSL error). It never prints the token.
+
 Gateway bot, no inbound ports. Alerts include price, ET and SGT time, the trigger id and the agent's reasoning.
 
 Buttons: EXECUTE (re-checks risk), SKIP, Mark Filled. Stop and target tracking starts only after Mark Filled.

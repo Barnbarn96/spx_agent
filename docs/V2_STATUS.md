@@ -9,7 +9,7 @@
 | Last updated | 2026-11-24 |
 | Branch | `release-v2` (from `release-v1` @ `f867349`) |
 | Commits so far | `fd68343` milestone 1 → `6d2d208` engine fixes → `16f1219` trigger types → two stops ends the day |
-| Tests | **138 passing**: `.venv/Scripts/python.exe -m pytest -q` |
+| Tests | **148 passing**: `.venv/Scripts/python.exe -m pytest -q` |
 | Live verification of v2 | **None yet.** Everything is unit-tested and replay-tested only. |
 
 **When you finish a task:**
@@ -127,6 +127,11 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 
 ## 4. Done
 
+**Discord ping tool (11-24)**
+- `tools/discord_ping.py`: one test message via REST with the `.env` settings; prints OK or a plain-English failure (bad token, wrong or non-numeric channel ID, missing View Channel / Send Messages, network/SSL). Exit 0/1. Never prints the token.
+- Tests: `tests/test_discord_ping.py` (10), with a fake client.
+- Why: the operator saw no Discord messages and the unit tests never touch Discord.
+
 **Two stops ends the day (was 1a-1, 11-24)**
 - `RiskManager.record_stop()` / `seed_stops()` / `stops_today()`, counted per ET day; `MAX_STOPS_PER_DAY` (2) in `config.py`.
 - `main.py`: every `StopHit` is counted after its alert; the 2nd posts "**HALT** — 2 stops: no new entries today (state/HALT)". `run_live()` calls `restore_stop_count()` from the journal first.
@@ -188,6 +193,7 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 - **Plan tooling:** `.venv/Scripts/python.exe tools/write_plan.py tests/fixtures/plan_v2_example.json --analysis tests/fixtures/analysis_2026-11-23.md --date 2026-11-23 --dry-run`. Expect "Plan OK" with 4 triggers.
 
 ## 7. Live verification checklist (the operator runs these; record results here)
+- [ ] `tools/discord_ping.py` prints "Discord OK" and the message appears in the channel. Do this first: every Discord item below depends on it.
 - [ ] `main.py` with Moomoo OpenD pre-market: SPY ticks flow, and after a plan with `spx_prev_close` loads, the log or the `decide()` notes show `ratio_source` = **prev closes**.
 - [ ] `/premarket <price>` end to end: analysis in chat, `analyses/<date>.md` written, plan installed, `main.py` logs "loaded today's plan", Discord summary posted.
 - [ ] `/intraday 7268 4.93` writes `state/yield.json`, and `main.py` logs "10Y yield updated".

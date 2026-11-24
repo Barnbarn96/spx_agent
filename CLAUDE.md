@@ -44,6 +44,7 @@ The two halves only share files under `state/`:
 - Python: `.venv/Scripts/python.exe` (Windows venv in the repo).
 - Tests: `.venv/Scripts/python.exe -m pytest -q`
 - Watcher: `.venv/Scripts/python.exe main.py` (in its own terminal; leave it running).
+- Discord check: `.venv/Scripts/python.exe tools/discord_ping.py` sends one test message and prints the exact reason if it fails.
 - Plan schema: `.venv/Scripts/python.exe tools/write_plan.py --schema`; worked example: `--example` (built from the Nov 23 analysis in `tests/fixtures/`).
 
 ## Trigger features (see `/premarket` for how to map write-up wording)
