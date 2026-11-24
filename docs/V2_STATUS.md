@@ -9,7 +9,7 @@
 | Last updated | 2026-11-24 |
 | Branch | `release-v2` (from `release-v1` @ `f867349`) |
 | Commits so far | `fd68343` milestone 1 → `6d2d208` engine fixes → `16f1219` trigger types → two stops ends the day |
-| Tests | **168 passing**: `.venv/Scripts/python.exe -m pytest -q` |
+| Tests | **180 passing**: `.venv/Scripts/python.exe -m pytest -q` |
 | Live verification of v2 | **None yet.** Everything is unit-tested and replay-tested only. |
 
 **When you finish a task:**
@@ -32,25 +32,19 @@ Ground rules for every task:
 
 ### 1a. Ready to build now
 
-**1. Alerts expire** (`notify.py`, `main.py`, `config.py`)
-- New settings: `ALERT_TTL_MIN` (e.g. 10) and `ALERT_MAX_DISTANCE_PTS` (e.g. 10).
-- On an EXECUTE tap, refuse if the alert is older than the TTL, or if the last SPX price is further than the maximum from the fire price. The notifier needs the orchestrator's `last_price`; pass a callable in.
-- Also move the trigger FIRED → SKIPPED in the engine when it expires, and journal it as an operator response of "expired".
-- *Done when:* tests show a stale-by-time tap and a stale-by-distance tap both refused with a reason, and a fresh tap working.
-
-**2. @mention on the alerts that matter** (`notify.py`, `config.py`)
+**1. @mention on the alerts that matter** (`notify.py`, `config.py`)
 - New setting: `DISCORD_MENTION_USER_ID`.
 - Prefix `<@id>` on: stop hit, invalidation, STOP MOVED, the two-stops HALT and feed stale.
 - Add a reminder if a FIRED alert has gone untapped for N minutes (the input poller in `main.py` is the place for timed checks).
 - *Done when:* tests check the prefix and that the reminder is sent once per alert.
 
-**3. A replan keeps `first_touch` counts** (`triggers.py`)
+**2. A replan keeps `first_touch` counts** (`triggers.py`)
 - Today `load_plan` creates a fresh `TriggerState`, so a replan resets `touches`. A `first_touch` trigger that survives a replan unchanged could then fire on a second touch, against the "fade the first touch" rule.
 - Replans happen through `/intraday` when a data or GEX screenshot changes the bias, so this is a real path.
 - In `TriggerEngine.load_plan`, carry `touches` (and the first-sight flag) over when the trigger id **and** its `price_between` zone are unchanged. A changed zone starts fresh.
 - *Done when:* engine tests show a touch, a replan with the same id and zone, then a second touch **not** firing; and a replan with a moved zone firing on its first touch.
 
-**4. `decide()` gets the real context** (`main.py` `_decide_notes`, `prompts/decide.md`)
+**3. `decide()` gets the real context** (`main.py` `_decide_notes`, `prompts/decide.md`)
 - Add:
   - the day's `analyses/<date>.md`: at least the levels table, scenarios and trade bias, trimmed to a sensible size
   - the trading rules section of CLAUDE.md
@@ -58,7 +52,7 @@ Ground rules for every task:
 - Update `prompts/decide.md` to tell the model how to use them. Keep the 30 s timeout and the default to SKIP.
 - *Done when:* a test asserts the notes contain the levels table and recent closes. Then run one real `decide()` by hand and check the reasoning cites them.
 
-**5. Feed polish** (`feed.py`)
+**4. Feed polish** (`feed.py`)
 - Don't recalibrate between 9:30 and 9:35 ET.
 - SPY ex-dividend days: allow a manual `--spy-dividend` / env override that's added back to SPY's previous close for that day.
 - Optional, with the operator's OK: recalibrate from a fresh GEX screenshot's `spx_in_shot` when drift is above 2 points.
@@ -102,6 +96,7 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 | 11-24 | **Close-confirmed triggers track closes through closed gates.** A close-through before `not_before` isn't fired late. The dwell clock runs through gates. | A 9:45 breakout is old news at 10:00. A hold is still a hold. |
 | 11-24 | **`first_touch` counts touches during gates and price in the zone at startup.** | "Fade the first touch" means the first one. |
 | 11-24 | **Stops default to any tick; `stop_confirm: close` is opt-in.** | The fastest exit is the safe default for 0DTE. |
+| 11-24 | **Alert age is measured from the Discord send time (wall clock), not the tick time; an expired alert goes to SKIPPED, not EXPIRED.** Untapped alerts expire by time only. | A `--sim` replay of a past date would otherwise expire on arrival. `EXPIRED` already means a trigger's window closed before it fired. Price can come back to an untapped alert, so distance is checked on the tap. |
 | 11-24 | **Breakeven uses the fire price as the entry.** It only ever tightens. | — |
 | 11-24 | **No fill price on EXECUTE (task dropped).** Mark Filled stays as the one-tap "I'm in" that starts stop/target tracking. | The operator trades off SPX key levels, not the option premium. |
 | 11-24 | **The soft wait is decided at tap time, and triggers alert inside it.** `/premarket` sets triggers' `not_before` to 09:30 and puts the wait in `no_entries_before`. A tap after the wait is a regular entry even if the alert came earlier; the fire-time tag is kept only for skips. | The journal should record when the operator actually entered. Seeing alerts inside the wait is what lets the operator judge early setups. |
@@ -109,12 +104,17 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 | 11-24 | **No VIX source in code.** VIX tiers and the VIX > 30 wait live in the `/premarket` write-up, its `size_pct` and its `not_before`. A mid-session VIX spike is handled by an `/intraday` replan. | A code check would duplicate the analysis; the operator sees VIX on screen. |
 | 11-24 | **No realized P&L reporting.** The daily loss limit HALT stays inert on purpose; two stops ends the day is the daily brake. | The operator doesn't want to type P&L. |
 | 11-24 | **Discord is for alerts only.** No `!yield` command and no GEX screenshots in Discord; inputs go through `/intraday` in Claude Code. | One input path, and it's the one that records state and offers replans. |
-| 11-24 | **Replans stay, via `/intraday`** (on a changed bias and the operator's yes). So the replan touch-count gap gets fixed (1a-3). | Adjusting the plan after a data surprise is the point of mid-session screenshots. |
+| 11-24 | **Replans stay, via `/intraday`** (on a changed bias and the operator's yes). So the replan touch-count gap gets fixed (1a-2). | Adjusting the plan after a data surprise is the point of mid-session screenshots. |
 | 11-24 | **Two stops: the count is rebuilt from the journal at startup, and the rebuild never creates the HALT.** Only the stop that reaches the limit does, so a HALT the operator deleted isn't re-created by a restart or a third stop. | The journal already has every `stop_hit`; no new state file. Deleting the HALT is the operator's override. |
 
 ---
 
 ## 4. Done
+
+**Alerts expire (was 1a-1 after the fill-price drop, 11-24)**
+- `ALERT_TTL_MIN` (10) and `ALERT_MAX_DISTANCE_PTS` (10) in `config.py` and `.env.example` (plus `MAX_STOPS_PER_DAY`).
+- `notify.py`: `_stale_reason()` / `_expire_if_stale()` on the EXECUTE tap and on the early-entry submit, before the risk gate; `expire_stale_alerts()` for untapped alerts. `main.py` wires `last_price_fn` and calls it from `poll_inputs()`, which then saves engine state.
+- Tests: `tests/test_v2_alert_expiry.py` (12). A mutation check (staleness off) fails 7.
 
 **Soft early-entry block (was 1a-2, 11-24)**
 - `Plan.no_entries_before`; `risk.is_early()`; `write_plan.py` checks it's within 09:30-15:00 and prints the wait.
@@ -174,7 +174,7 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 
 ## 5. Known gaps and risks (not yet tasks, but don't forget them)
 - **The daily loss limit is inert by choice** (§3). Two stops ends the day is the daily brake.
-- **A replan resets touch counts:** now task 1a-3.
+- **A replan resets touch counts:** now task 1a-2.
 - **Close-confirmed stops have no hard backstop.** A violent move only exits at the next bar close. Consider a "tick stop at stop ± N pts" safety net.
 - **A "stall"/rejection pattern can't be expressed.** Plans say "confirm by eye" in `notes`.
 - **The `main.py` handler for `StopMoved` has no test** (the engine side does).
@@ -199,6 +199,7 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 - [ ] Restart `main.py` mid-session: the "Restarted: restored trigger state" notice appears, and an OPEN trade keeps its stop.
 - [ ] `/eod` writes `context/context_<date>.md`.
 - [ ] Early entry: with a plan whose `no_entries_before` is in the future, an alert shows "Early entry — override?"; tapping it opens the reason box; submitting confirms and the reason appears in the message.
+- [ ] Alert expiry: leave an alert untapped for 10+ minutes and the "ALERT EXPIRED" notice appears; tapping EXECUTE on it then says Ignored (SKIPPED).
 - [ ] Two stops in one day: the 2nd posts the HALT notice and `state/HALT` exists; EXECUTE on a later alert is refused. Delete `state/HALT` by hand to resume.
 - [ ] From v1, still unverified: continuous RTH ticks, reconnect with backoff, the dead-man rule (`docs/v1/ROLLOUT_PLAN.md` Step 4).
 

@@ -42,6 +42,11 @@ SPX_ESTIMATE_DRIFT_WARN_PTS = float(os.environ.get("SPX_ESTIMATE_DRIFT_WARN_PTS"
 # How often main.py polls state/ for plan / yield / GEX changes and checks
 # time-based reminders. Runs on its own timer, independent of ticks.
 INPUT_POLL_S = float(os.environ.get("INPUT_POLL_S", "5"))
+
+# notify.py: an alert's EXECUTE is refused once the alert is older than this,
+# or once SPX is this far from the fire price. Untapped alerts expire too.
+ALERT_TTL_MIN = float(os.environ.get("ALERT_TTL_MIN", "10"))
+ALERT_MAX_DISTANCE_PTS = float(os.environ.get("ALERT_MAX_DISTANCE_PTS", "10"))
 # v1 generated a plan automatically at 08:00 ET. In v2 the plan comes from
 # Claude Code's /premarket command, so this is off unless explicitly enabled.
 PLAN_AUTOGEN = os.environ.get("PLAN_AUTOGEN", "false").strip().lower() in ("1", "true", "yes")

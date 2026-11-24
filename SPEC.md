@@ -281,8 +281,13 @@ Buttons: EXECUTE (re-checks risk), SKIP, Mark Filled. Stop and target tracking s
 
 Before the plan's `no_entries_before`, EXECUTE is labelled "Early entry — override?" and asks for a reason (§12).
 
+**Alert expiry (v2):** the alert's send time (wall clock) and the trigger's fire price are the reference.
+- On an EXECUTE tap, and again when an early-entry reason is submitted, the tap is refused if the alert is older than `ALERT_TTL_MIN` (10) or the last SPX price is more than `ALERT_MAX_DISTANCE_PTS` (10) from the fire price, either direction. The message says "EXPIRED: <reason> — not confirmed, trigger skipped".
+- The expiry check runs before the risk gate. An expired trigger goes FIRED → SKIPPED and its decision is journaled with operator response `expired`.
+- An untapped alert is skipped by the input poller once it passes the TTL, with one "ALERT EXPIRED" notice. Distance alone doesn't expire an untapped alert, because price can come back; it's checked on the tap.
+- With no price yet, only the time limit applies. SKIP still works on a stale alert and is journaled as `skip`.
+
 **[planned]:**
-- Alerts expire on a time limit or when price is too far from the entry.
 - Stops and invalidations @mention the operator, with a reminder if an alert goes untapped.
 - Inbound `!yield` and screenshots.
 

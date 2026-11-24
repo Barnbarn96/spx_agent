@@ -478,6 +478,8 @@ class Orchestrator:
         await self._reload_yield_if_changed()
         await self._reload_gex_if_changed()
         await self._check_yield_nudge(datetime.now(ET))
+        if self.notifier is not None and hasattr(self.notifier, "expire_stale_alerts"):
+            await self.notifier.expire_stale_alerts()
         if self.notifier and self._pending_notices:
             notices, self._pending_notices = self._pending_notices, []
             for text in notices:
@@ -732,6 +734,7 @@ class Orchestrator:
                 journal=self.journal,
                 risk=self.risk,
             )
+            self.notifier.last_price_fn = lambda: self.last_price
             await self.notifier.start()
         else:
             print("[main] DISCORD_BOT_TOKEN/CHANNEL_ID not set — alerts will only be journaled.", file=sys.stderr)

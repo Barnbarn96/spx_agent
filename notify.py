@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 import discord
 
+import config
 from schema import (
     Decision,
     FlatByReached,
@@ -126,6 +128,13 @@ class Notifier:
         self._pending_decision_id: dict[str, int] = {}
         # Clock for the EXECUTE-tap checks; tests replace it.
         self.now_fn = lambda: datetime.now(ET)
+        # v2 alert expiry. main.py points last_price_fn at its last SPX price.
+        self.last_price_fn: Callable[[], float | None] = lambda: None
+        self.alert_ttl_min = config.ALERT_TTL_MIN
+        self.alert_max_distance_pts = config.ALERT_MAX_DISTANCE_PTS
+        # trigger_id -> when its EXECUTE/SKIP alert was sent (wall clock, so
+        # a --sim replay of a past date isn't expired on arrival)
+        self._alert_sent_at: dict[str, datetime] = {}
 
         intents = discord.Intents.default()
         self.client = discord.Client(intents=intents)
@@ -200,6 +209,7 @@ class Notifier:
         self, trigger: Trigger, tick: Tick, decision: Decision, decision_id: int
     ) -> None:
         self.register_decision(trigger.id, decision_id)
+        self._alert_sent_at[trigger.id] = self.now_fn()
         text = (
             f"**TRIGGER FIRED: {trigger.id}**\n"
             f"{trigger.side} @ {_fmt_price(tick.price)} — {_fmt_times(tick.ts)}\n"
@@ -306,6 +316,8 @@ class Notifier:
 
         if action == "confirm":
             now = self.now_fn()
+            if await self._expire_if_stale(interaction, trigger_id, original, now):
+                return
             blocked = self._risk_block(now)
             if blocked:
                 await interaction.response.edit_message(content=original + blocked)
@@ -321,6 +333,7 @@ class Notifier:
             await interaction.response.edit_message(content=original + "\n\n>> EXECUTE confirmed by operator")
             await self.send_mark_filled_prompt(trigger_id)
         elif action == "skip":  # keeps the fire-time early/regular tag
+            self._alert_sent_at.pop(trigger_id, None)
             self.engine.skip(trigger_id)
             decision_id = self._pending_decision_id.get(trigger_id)
             if decision_id is not None and self.journal is not None:
@@ -344,7 +357,70 @@ class Notifier:
             return None
         return f"\n\n>> EXECUTE blocked by risk ({gate.reason}) — not confirmed"
 
+    def _stale_reason(self, trigger_id: str, now: datetime) -> str | None:
+        """Why this alert is too old to act on, or None if it's still fresh."""
+        sent_at = self._alert_sent_at.get(trigger_id)
+        if sent_at is not None:
+            age_min = (now - sent_at).total_seconds() / 60
+            if age_min > self.alert_ttl_min:
+                return f"alert is {int(age_min)} min old (limit {self.alert_ttl_min:g})"
+        state = self.engine.states.get(trigger_id) if self.engine is not None else None
+        last = self.last_price_fn()
+        if state is not None and state.fire_price is not None and last is not None:
+            distance = abs(last - state.fire_price)
+            if distance > self.alert_max_distance_pts:
+                return (
+                    f"SPX {_fmt_price(last)} is {distance:.1f} pts from the "
+                    f"{_fmt_price(state.fire_price)} alert price (limit {self.alert_max_distance_pts:g})"
+                )
+        return None
+
+    async def _expire(self, trigger_id: str) -> None:
+        """FIRED -> SKIPPED, journaled as "expired"."""
+        self.engine.skip(trigger_id)
+        self._alert_sent_at.pop(trigger_id, None)
+        decision_id = self._pending_decision_id.get(trigger_id)
+        if decision_id is not None and self.journal is not None:
+            await self.journal.log_operator_response(decision_id, "expired")
+
+    async def _expire_if_stale(
+        self, interaction: discord.Interaction, trigger_id: str, original: str, now: datetime
+    ) -> bool:
+        reason = self._stale_reason(trigger_id, now)
+        if reason is None:
+            return False
+        await self._expire(trigger_id)
+        await interaction.response.edit_message(
+            content=original + f"\n\n>> EXPIRED: {reason} — not confirmed, trigger skipped"
+        )
+        return True
+
+    async def expire_stale_alerts(self) -> list[str]:
+        """Called from main.py's input poller: an alert left untapped past
+        the TTL is skipped, with one notice. Distance alone doesn't expire an
+        untapped alert (price may come back); it's checked on the tap."""
+        if self.engine is None:
+            return []
+        now = self.now_fn()
+        expired = []
+        for trigger_id, sent_at in list(self._alert_sent_at.items()):
+            state = self.engine.states.get(trigger_id)
+            if state is None or state.status.value != "FIRED":
+                self._alert_sent_at.pop(trigger_id, None)  # tapped, replanned away
+                continue
+            age_min = (now - sent_at).total_seconds() / 60
+            if age_min <= self.alert_ttl_min:
+                continue
+            await self._expire(trigger_id)
+            await self.send_text(
+                f"**ALERT EXPIRED: {trigger_id}** — untapped for {int(age_min)} min "
+                f"(limit {self.alert_ttl_min:g}). Skipped; no entry. {_fmt_times(now)}"
+            )
+            expired.append(trigger_id)
+        return expired
+
     async def _confirm(self, trigger_id: str, entry_timing: str, early_reason: str | None) -> None:
+        self._alert_sent_at.pop(trigger_id, None)
         self.engine.confirm(trigger_id)
         decision_id = self._pending_decision_id.get(trigger_id)
         if decision_id is not None and self.journal is not None:
@@ -371,7 +447,10 @@ class Notifier:
                 content=original + "\n\n>> Early entry needs a reason — not confirmed. Tap again to retry."
             )
             return
-        blocked = self._risk_block(self.now_fn())
+        now = self.now_fn()
+        if await self._expire_if_stale(interaction, trigger_id, original, now):
+            return
+        blocked = self._risk_block(now)
         if blocked:
             await interaction.response.edit_message(content=original + blocked)
             return
