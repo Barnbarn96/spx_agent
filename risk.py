@@ -20,6 +20,15 @@ def _parse_hhmm(hhmm: str) -> tuple[int, int]:
     return int(hh), int(mm)
 
 
+def is_early(plan, now: datetime) -> bool:
+    """True before the plan's soft opening wait (Plan.no_entries_before)."""
+    if plan is None or plan.no_entries_before is None:
+        return False
+    hh, mm = _parse_hhmm(plan.no_entries_before)
+    now_et = now.astimezone(ET)
+    return now_et < now_et.replace(hour=hh, minute=mm, second=0, microsecond=0)
+
+
 @dataclass
 class RiskCheckResult:
     allowed: bool

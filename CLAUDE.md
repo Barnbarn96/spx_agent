@@ -54,8 +54,9 @@ The two halves only share files under `state/`:
   - `first_touch`
   - target `then_stop: "breakeven"`
   - `stop_confirm` on a bar close
-- **Still not expressible:** a "stall"/rejection pattern and the early-entry override. Approximate them and say so in `notes`.
+- **Soft opening wait:** plan `no_entries_before` (HH:MM ET). Alerts still come, but EXECUTE before it needs an override reason (journaled as early). Triggers' `not_before` stays at 09:30 unless an idea itself is time-gated.
+- **Still not expressible:** a "stall"/rejection pattern. Approximate it and say so in `notes`.
 - **Behaviours to know:**
   - Price already in a zone at first sight → `AlreadyInZone`, no fire.
   - A jump straight through a zone → `ZoneSkipped`, no fire.
-  - Without a fill price, breakeven uses the fire price as the entry.
+  - Breakeven uses the fire price (the SPX level) as the entry; no fill price is collected.

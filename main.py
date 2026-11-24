@@ -31,7 +31,7 @@ import releases
 from feed import FeedManager, FeedStale, MoomooFeed, PolygonFeed, ReplayTickSource, TickSource
 from journal import JournalDB
 from replay import load_ticks
-from risk import RiskManager
+from risk import RiskManager, is_early
 from schema import (
     AlreadyInZone,
     Decision,
@@ -423,7 +423,10 @@ class Orchestrator:
         start = time.monotonic()
         decision: Decision = await agent.decide(trigger, self.plan, market_context)
         latency_ms = (time.monotonic() - start) * 1000
-        decision_id = await self.journal.log_decision(event.trigger_id, decision, latency_ms)
+        entry_timing = "early" if is_early(self.plan, event.tick.ts) else "regular"
+        decision_id = await self.journal.log_decision(
+            event.trigger_id, decision, latency_ms, entry_timing=entry_timing
+        )
 
         # decide() ran in the background, so the world may have moved on: a
         # replan can have dropped or reset the trigger. Only alert on a

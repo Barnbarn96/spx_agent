@@ -241,12 +241,18 @@ class Plan(BaseModel):
     triggers: list[Trigger] = Field(min_length=1)
     invalidation: Invalidation
     flat_by: str
+    # v2: soft opening wait (HH:MM ET). Triggers still alert before it, but
+    # EXECUTE then needs an override with a reason (notify.py), and the
+    # journal tags the decision "early". None = no soft wait.
+    no_entries_before: str | None = None
     scheduled_events: list[ScheduledEvent] = Field(default_factory=list)
     notes: str = ""
 
     @model_validator(mode="after")
     def _check_flat_by(self) -> "Plan":
         _validate_hhmm(self.flat_by)
+        if self.no_entries_before is not None:
+            _validate_hhmm(self.no_entries_before)
         return self
 
     @model_validator(mode="after")

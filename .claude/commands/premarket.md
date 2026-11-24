@@ -31,7 +31,8 @@ Input: `$ARGUMENTS` - the current SPX price from TradingView `SPREADEX:SPX`, opt
      - "fade the first touch of X": `"first_touch": true`. A stall or rejection itself can't be expressed; say so in `notes`.
      - Plain "at X" / no wording: leave `confirm` out (any tick).
    - Stops default to any tick (fastest exit). Use `"stop_confirm": {"type": "close", "timeframe": "1m"}` only if the write-up says to stop on a close.
-   - `not_before`: "09:30" normally; "09:45"-"10:00" when the write-up says to wait (data day, big gap, VIX > 30).
+   - `not_before` on each trigger: "09:30" (the open), unless the write-up says an idea is only valid after a given time (e.g. a breakout "after the 10:00 data"), which makes it a hard gate.
+   - `no_entries_before` on the plan (soft opening wait): "09:30" normally; "09:45"-"10:00" when the write-up says to wait (data day, big gap, expiration day, VIX > 30). Alerts still arrive inside the wait, but EXECUTE asks for an override reason, and the journal tags it early.
    - `not_after` "15:00", `flat_by` "15:30" (or earlier on a half day).
    - Size from the write-up within the VIX tiers in CLAUDE.md.
    - Yield gates where the write-up uses them: `yield_below` / `yield_above` in percent.

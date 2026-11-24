@@ -122,7 +122,7 @@ See `python tools/write_plan.py --schema`, and `--example` for a worked plan bui
 - **v2 trigger and target fields:**
   - `Trigger.stop_confirm` (tick or close only; default tick)
   - `Target.then_stop: "breakeven"`
-- **[planned]:** plan-level `no_entries_before`.
+- **v2 plan field:** `Plan.no_entries_before` (HH:MM ET or null), the soft opening wait (§12). `write_plan.py` requires it between 09:30 and the 15:00 entry cutoff. A trigger's own `not_before` stays a hard gate (no fire at all).
 
 ## 6. Trigger engine (`triggers.py`)
 
@@ -158,11 +158,11 @@ Events: `TriggerFired`, `TargetHit`, `StopHit`, `Invalidated`, `FlatByReached`, 
 - **`first_touch`:** entries into the zone are counted on tick prices, ignoring gates. Already inside at first sight counts as a touch, and so does a jump through the zone. The trigger fires only while it's on touch #1.
 - **`then_stop: breakeven`:**
   - When that target is hit, the stop moves to the entry price (`StopMoved` event). It only ever tightens.
-  - Entry = `mark_filled(fill_price)`, or the fire price if no fill was given (C1 will supply fills).
+  - Entry = the fire price (the SPX level where the trigger fired). The operator trades off key levels, not the option premium, so no fill price is collected (11-24). `mark_filled(fill_price)` still accepts one if a caller ever passes it.
   - With no entry price known, it emits `EngineWarning` and leaves the stop unchanged.
 - **`stop_confirm: close`:** a stop counts only when a 1m or 5m bar closes beyond it. The default tick stop exits on the first tick through, which is the fastest. There's no hard backstop for close-confirmed stops yet.
 
-**[planned] (see V2_STATUS):** a "stall"/rejection pattern; plan-level `no_entries_before` with the early-entry override.
+**Not expressible yet (see V2_STATUS §5):** a "stall"/rejection pattern.
 
 ## 7. Watcher (`main.py`)
 
@@ -261,10 +261,13 @@ Pipeline: the analysis is shown in chat and saved to `analyses/<date>.md`, Claud
 
 **Two stops ends the day (v2):** `main.py` calls `RiskManager.record_stop()` on every `StopHit`. The count is per ET day (by the tick's time). The stop that reaches `MAX_STOPS_PER_DAY` (2) creates `state/HALT` and posts "**HALT** — 2 stops: no new entries today (state/HALT)". At startup, `run_live()` rebuilds the count from the journal's `stop_hit` events since 00:00 ET, so a restart after one stop still halts on the next. The rebuild never creates the HALT itself. If the operator deletes the HALT, a later stop doesn't re-create it (only the one that reaches the limit does).
 
-**Not in code, by decision (11-24):** VIX size tiers and the VIX > 30 wait are applied in the `/premarket` write-up and the plan's `size_pct` / `not_before`. There's no per-trade dollar cap.
+**Soft opening wait (v2):** `Plan.no_entries_before`. `risk.is_early(plan, now)` is true before it.
+- Triggers still fire and alert inside the wait. The alert says "Early: inside today's opening wait (until HH:MM ET / HH:MM SGT)" and its button reads **"Early entry — override?"**.
+- Whether a tap is early is decided at **tap time**, not by the label: a tap after the wait confirms normally.
+- An early tap runs `gate_execute()` first (HALT, cutoff and max open still win), then opens a reason box (Discord modal, max 200 characters). Submitting re-checks the trigger is still FIRED and runs `gate_execute()` again before confirming. A blank reason is refused.
+- Journal: `decisions.entry_timing` is set at fire time (`early` / `regular`) and re-set at confirm by tap time; `decisions.early_reason` holds the override reason. A skip keeps the fire-time tag.
 
-**[planned]:**
-- **A soft early-entry block:** the plan sets `no_entries_before`; a trigger before it shows "Early entry — override?"; the override and reason are journaled; trades are tagged early or regular.
+**Not in code, by decision (11-24):** VIX size tiers and the VIX > 30 wait are applied in the `/premarket` write-up and the plan's `size_pct` / `no_entries_before`. There's no per-trade dollar cap.
 
 ## 13. Discord (`notify.py`)
 
@@ -276,8 +279,9 @@ Buttons: EXECUTE (re-checks risk), SKIP, Mark Filled. Stop and target tracking s
 
 **Stale buttons (v2):** a tap whose trigger is no longer in the expected state (EXECUTE/SKIP need FIRED, Mark Filled needs CONFIRMED) is answered with "Ignored: … no longer awaiting this (STATUS)". It no longer falsely reports success. This happens after a replan or a restart that re-armed the trigger.
 
+Before the plan's `no_entries_before`, EXECUTE is labelled "Early entry — override?" and asks for a reason (§12).
+
 **[planned]:**
-- EXECUTE asks for the fill price and opens the trade, replacing Mark Filled.
 - Alerts expire on a time limit or when price is too far from the entry.
 - Stops and invalidations @mention the operator, with a reminder if an alert goes untapped.
 - Inbound `!yield` and screenshots.

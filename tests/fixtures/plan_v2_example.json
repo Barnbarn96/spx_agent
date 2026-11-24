@@ -14,7 +14,7 @@
           7195.0,
           7215.0
         ],
-        "not_before": "10:00",
+        "not_before": "09:30",
         "not_after": "15:00",
         "approach": "from_above"
       },
@@ -41,7 +41,7 @@
       "side": "long",
       "condition": {
         "price_above": 7260.0,
-        "not_before": "10:00",
+        "not_before": "09:30",
         "not_after": "15:00",
         "requires_not_filled": [
           "buy_dip"
@@ -74,7 +74,7 @@
       "side": "short",
       "condition": {
         "price_above": 7288.0,
-        "not_before": "10:00",
+        "not_before": "09:30",
         "not_after": "15:00",
         "requires_not_filled": [
           "breakout_long"
@@ -99,7 +99,7 @@
       "side": "short",
       "condition": {
         "price_below": 7170.0,
-        "not_before": "10:00",
+        "not_before": "09:30",
         "not_after": "15:00",
         "requires_not_filled": [
           "buy_dip"
@@ -132,6 +132,7 @@
     "below": 7100.0,
     "action": "gap fully fading - stand aside, no new entries"
   },
+  "no_entries_before": "10:00",
   "flat_by": "15:30",
   "scheduled_events": [],
   "notes": "Cautiously bullish after the Huang reinstatement gap. Must-hold 7150, resistance 7250 then 7288. Breakout needs a 5-minute close above 7260; breakdown needs price to hold below 7170 for 5 minutes. The 7288 fade is first touch only, and the stall itself must be confirmed by eye."

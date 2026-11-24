@@ -24,6 +24,7 @@ from schema import (
     Tick,
     Trigger,
 )
+from risk import is_early
 from triggers import TriggerEngine
 
 ET = ZoneInfo("America/New_York")
@@ -34,6 +35,37 @@ def _fmt_times(ts: datetime) -> str:
     et = ts.astimezone(ET).strftime("%H:%M:%S")
     sgt = ts.astimezone(SGT).strftime("%H:%M:%S")
     return f"{et} ET / {sgt} SGT"
+
+
+def _fmt_wait(plan: Plan) -> str:
+    """The plan's soft opening wait in ET and SGT, e.g. "10:00 ET / 23:00 SGT"."""
+    hh, mm = (int(x) for x in plan.no_entries_before.split(":"))
+    et = datetime(plan.date.year, plan.date.month, plan.date.day, hh, mm, tzinfo=ET)
+    return f"{et:%H:%M} ET / {et.astimezone(SGT):%H:%M} SGT"
+
+
+EARLY_LABEL = "Early entry — override?"
+
+
+class EarlyEntryModal(discord.ui.Modal):
+    """Asks for a one-line reason before an entry inside the opening wait.
+    Its submit goes back through Notifier.submit_early_override, which
+    re-checks the trigger state and the risk gate."""
+
+    def __init__(self, notifier: "Notifier", trigger_id: str, wait: str) -> None:
+        super().__init__(title="Early entry override", timeout=300)
+        self.notifier = notifier
+        self.trigger_id = trigger_id
+        self.reason = discord.ui.TextInput(
+            label="Why enter before the wait?",
+            placeholder=f"Wait is until {wait}. One line, e.g. reclaimed 7200 on volume",
+            max_length=200,
+            required=True,
+        )
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.notifier.submit_early_override(interaction, self.trigger_id, self.reason.value)
 
 
 def _fmt_price(p: float) -> str:
@@ -92,6 +124,8 @@ class Notifier:
         # trigger_id -> journal decisions.id, so a button tap can be logged
         # against the decision that produced it.
         self._pending_decision_id: dict[str, int] = {}
+        # Clock for the EXECUTE-tap checks; tests replace it.
+        self.now_fn = lambda: datetime.now(ET)
 
         intents = discord.Intents.default()
         self.client = discord.Client(intents=intents)
@@ -144,6 +178,8 @@ class Notifier:
             )
         lines.append("")
         lines.append(f"Invalidation: {plan.invalidation.below or ''} / {plan.invalidation.above or ''}")
+        if plan.no_entries_before is not None:
+            lines.append(f"Opening wait: until {_fmt_wait(plan)} (earlier entries need an override)")
         lines.append(f"Flat by: {plan.flat_by} ET")
         if plan.scheduled_events:
             lines.append("Scheduled: " + ", ".join(f"{e.time} {e.release}" for e in plan.scheduled_events))
@@ -170,10 +206,19 @@ class Notifier:
             f"Instrument: {trigger.action.instrument} ({trigger.action.size_pct}%)\n"
             f"Agent recommends **{decision.action}** (confidence {decision.confidence}): {decision.reasoning}"
         )
+        plan = self.engine.plan if self.engine is not None else None
+        early = is_early(plan, tick.ts)
+        if early:
+            text += (
+                f"\n**Early:** inside today's opening wait (until {_fmt_wait(plan)}). "
+                "Entering now needs an override with a reason."
+            )
         view = discord.ui.View(timeout=None)
         view.add_item(
             discord.ui.Button(
-                label="EXECUTE", style=discord.ButtonStyle.success, custom_id=f"confirm:{trigger.id}"
+                label=EARLY_LABEL if early else "EXECUTE",
+                style=discord.ButtonStyle.secondary if early else discord.ButtonStyle.success,
+                custom_id=f"confirm:{trigger.id}",
             )
         )
         view.add_item(
@@ -260,20 +305,22 @@ class Notifier:
             return
 
         if action == "confirm":
-            if self.risk is not None:
-                gate = self.risk.gate_execute(self.engine, datetime.now(ET))
-                if not gate.allowed:
-                    await interaction.response.edit_message(
-                        content=original + f"\n\n>> EXECUTE blocked by risk ({gate.reason}) — not confirmed"
-                    )
-                    return
-            self.engine.confirm(trigger_id)
-            decision_id = self._pending_decision_id.get(trigger_id)
-            if decision_id is not None and self.journal is not None:
-                await self.journal.log_operator_response(decision_id, "confirm")
+            now = self.now_fn()
+            blocked = self._risk_block(now)
+            if blocked:
+                await interaction.response.edit_message(content=original + blocked)
+                return
+            # v2: inside the plan's soft opening wait, ask for a reason first.
+            # The decision is by tap time, whatever the button's label says.
+            if is_early(self.engine.plan, now):
+                await interaction.response.send_modal(
+                    EarlyEntryModal(self, trigger_id, _fmt_wait(self.engine.plan))
+                )
+                return
+            await self._confirm(trigger_id, "regular", None)
             await interaction.response.edit_message(content=original + "\n\n>> EXECUTE confirmed by operator")
             await self.send_mark_filled_prompt(trigger_id)
-        elif action == "skip":
+        elif action == "skip":  # keeps the fire-time early/regular tag
             self.engine.skip(trigger_id)
             decision_id = self._pending_decision_id.get(trigger_id)
             if decision_id is not None and self.journal is not None:
@@ -285,3 +332,51 @@ class Notifier:
             if decision_id is not None and self.journal is not None:
                 await self.journal.log_filled(decision_id)
             await interaction.response.edit_message(content=original + "\n\n>> Marked FILLED")
+
+    # -- EXECUTE helpers (v2) ---------------------------------------------------
+
+    def _risk_block(self, now: datetime) -> str | None:
+        """The text to append if the risk gate refuses an entry, else None."""
+        if self.risk is None:
+            return None
+        gate = self.risk.gate_execute(self.engine, now)
+        if gate.allowed:
+            return None
+        return f"\n\n>> EXECUTE blocked by risk ({gate.reason}) — not confirmed"
+
+    async def _confirm(self, trigger_id: str, entry_timing: str, early_reason: str | None) -> None:
+        self.engine.confirm(trigger_id)
+        decision_id = self._pending_decision_id.get(trigger_id)
+        if decision_id is not None and self.journal is not None:
+            await self.journal.log_operator_response(
+                decision_id, "confirm", entry_timing=entry_timing, early_reason=early_reason
+            )
+
+    async def submit_early_override(
+        self, interaction: discord.Interaction, trigger_id: str, reason: str
+    ) -> None:
+        """The early-entry reason box was submitted. Time has passed since the
+        tap, so re-check the trigger and the risk gate (HALT still wins)."""
+        original = interaction.message.content if interaction.message else ""
+        reason = " ".join((reason or "").split())
+        state = self.engine.states.get(trigger_id) if self.engine is not None else None
+        if state is None or state.status.value != "FIRED":
+            now_status = "removed" if state is None else state.status.value
+            await interaction.response.edit_message(
+                content=original + f"\n\n>> Ignored: `{trigger_id}` is no longer awaiting this ({now_status})"
+            )
+            return
+        if not reason:
+            await interaction.response.edit_message(
+                content=original + "\n\n>> Early entry needs a reason — not confirmed. Tap again to retry."
+            )
+            return
+        blocked = self._risk_block(self.now_fn())
+        if blocked:
+            await interaction.response.edit_message(content=original + blocked)
+            return
+        await self._confirm(trigger_id, "early", reason)
+        await interaction.response.edit_message(
+            content=original + f"\n\n>> EARLY ENTRY confirmed by operator: {reason}"
+        )
+        await self.send_mark_filled_prompt(trigger_id)

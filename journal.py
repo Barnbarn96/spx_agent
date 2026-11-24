@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS decisions (
     latency_ms REAL,
     operator_response TEXT,
     operator_response_ts TEXT,
-    filled_ts TEXT
+    filled_ts TEXT,
+    entry_timing TEXT,
+    early_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS releases (
@@ -81,8 +83,9 @@ class JournalDB:
         already-existing table — patch older journal.db files forward."""
         cursor = await self._conn.execute("PRAGMA table_info(decisions)")
         columns = {row[1] for row in await cursor.fetchall()}
-        if "filled_ts" not in columns:
-            await self._conn.execute("ALTER TABLE decisions ADD COLUMN filled_ts TEXT")
+        for column in ("filled_ts", "entry_timing", "early_reason"):
+            if column not in columns:
+                await self._conn.execute(f"ALTER TABLE decisions ADD COLUMN {column} TEXT")
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -122,18 +125,38 @@ class JournalDB:
         return cursor.lastrowid
 
     async def log_decision(
-        self, trigger_id: str, decision: Decision, latency_ms: float | None = None
+        self,
+        trigger_id: str,
+        decision: Decision,
+        latency_ms: float | None = None,
+        entry_timing: str | None = None,
     ) -> int:
+        """entry_timing: "early" / "regular" by the fire time against the
+        plan's no_entries_before. A confirm later re-tags it by tap time."""
         cursor = await self.conn.execute(
             "INSERT INTO decisions "
-            "(ts, trigger_id, agent_action, reasoning, confidence, latency_ms) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (_now_iso(), trigger_id, decision.action, decision.reasoning, decision.confidence, latency_ms),
+            "(ts, trigger_id, agent_action, reasoning, confidence, latency_ms, entry_timing) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                _now_iso(),
+                trigger_id,
+                decision.action,
+                decision.reasoning,
+                decision.confidence,
+                latency_ms,
+                entry_timing,
+            ),
         )
         await self.conn.commit()
         return cursor.lastrowid
 
-    async def log_operator_response(self, decision_id: int, response: str) -> None:
+    async def log_operator_response(
+        self,
+        decision_id: int,
+        response: str,
+        entry_timing: str | None = None,
+        early_reason: str | None = None,
+    ) -> None:
         """Records the operator's gate decision (confirm/skip) on a fired
         trigger. Not used for the later mark-filled step — see log_filled —
         since a single decision can go through both, and this would
@@ -142,6 +165,11 @@ class JournalDB:
             "UPDATE decisions SET operator_response = ?, operator_response_ts = ? WHERE id = ?",
             (response, _now_iso(), decision_id),
         )
+        if entry_timing is not None:
+            await self.conn.execute(
+                "UPDATE decisions SET entry_timing = ?, early_reason = ? WHERE id = ?",
+                (entry_timing, early_reason, decision_id),
+            )
         await self.conn.commit()
 
     async def log_filled(self, decision_id: int) -> None:

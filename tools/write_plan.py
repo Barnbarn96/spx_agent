@@ -121,6 +121,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     if plan.flat_by > LATEST_FLAT_BY:
         problems.append(f"flat_by {plan.flat_by} is after the {LATEST_FLAT_BY} ET exit rule")
+    if plan.no_entries_before is not None and not ("09:30" <= plan.no_entries_before <= config.ENTRY_CUTOFF_ET):
+        problems.append(
+            f"no_entries_before {plan.no_entries_before} must be between 09:30 and the "
+            f"{config.ENTRY_CUTOFF_ET} ET entry cutoff"
+        )
 
     state_path = Path(config.STATE_DIR) / f"plan_{plan.date}.json"
     old_plan = None
@@ -134,6 +139,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"Plan OK: {plan.date}, bias {plan.bias}, {len(plan.triggers)} triggers, flat by {plan.flat_by} ET")
+    if plan.no_entries_before is not None:
+        print(f"  Opening wait: alerts before {plan.no_entries_before} ET need an early-entry override")
     for t in plan.triggers:
         c = t.condition
         zone = (

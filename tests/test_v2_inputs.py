@@ -207,6 +207,22 @@ def test_write_plan_rejects_late_flat_by(state_dir, tmp_path, capsys):
     assert "15:30" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("bad", ["09:15", "15:10"])
+def test_write_plan_rejects_opening_wait_outside_the_session(state_dir, tmp_path, capsys, bad):
+    data = json.loads((FIXTURES / "plan_v2_example.json").read_text(encoding="utf-8"))
+    data["no_entries_before"] = bad
+    draft = tmp_path / "draft.json"
+    draft.write_text(json.dumps(data), encoding="utf-8")
+    assert _cli(draft, "--analysis", FIXTURES / "analysis_2026-11-23.md", "--dry-run") == 1
+    assert "no_entries_before" in capsys.readouterr().err
+
+
+def test_write_plan_shows_the_opening_wait(state_dir, capsys):
+    plan_json = FIXTURES / "plan_v2_example.json"
+    assert _cli(plan_json, "--analysis", FIXTURES / "analysis_2026-11-23.md", "--date", "2026-11-23", "--dry-run") == 0
+    assert "Opening wait: alerts before 10:00 ET need an early-entry override" in capsys.readouterr().out
+
+
 # -- tools/set_gex.py ---------------------------------------------------------
 
 
