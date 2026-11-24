@@ -200,8 +200,10 @@ Events: `TriggerFired`, `TargetHit`, `StopHit`, `Invalidated`, `FlatByReached`, 
   2. Fallback when the plan has no `spx_prev_close`: v1's `calibrate(spx_reference)`, which uses the latest SPY print. It's less accurate, and it's ignored once (1) is set.
 
   `ratio_source` records which method set the ratio.
+- **Opening freeze (v2):** once the ratio has been calibrated, no change is applied between 09:30:00 and 09:34:59 ET (by the quote's timestamp, else the wall clock). A change asked for in that window (a new SPY previous close, a replan's calibration) is held, shown in `ratio_note` and in `decide()`'s notes, and applied on the first quote at or after 09:35. The first calibration of the day is never held back.
+- **SPY ex-dividend days (v2):** set `SPY_DIVIDEND_DATE` + `SPY_DIVIDEND_USD`, or run `main.py --spy-dividend <USD>` for today. On that ET date only, the dividend is **subtracted** from SPY's previous close before the ratio is computed (`ratio_source` shows "ex-div -X"). SPY opens about one dividend lower while SPX doesn't move, so without it the estimate reads about 10× the dividend low. Must be between $0 and $10.
 - **Known gaps:**
-  - SPY ex-dividend days aren't adjusted (error about 0.2%).
+  - Whether Moomoo's `prev_close_price` on an ex-dividend day is the actual close (needs the adjustment) or already dividend-adjusted (needs none) is **unverified**. Check on the next ex-date with a GEX screenshot: the SPX estimate drift warning (§7) shows which.
   - That `prev_close_price` is present in push rows during extended hours is **unverified live**.
 - **Not available on the operator's Moomoo account:**
   - SPX index quotes (an API restriction)
@@ -313,6 +315,8 @@ Before the plan's `no_entries_before`, EXECUTE is labelled "Early entry — over
 | Risk | `DAILY_LOSS_LIMIT_USD`, `MAX_OPEN_TRIGGERS` |
 | Model | `DECIDE_MODEL`, `PLAN_MODEL`, `DECIDE_EFFORT`, `PLAN_EFFORT` |
 | v2 inputs | `YIELD_MAX_AGE_MIN` (20), `GEX_MAX_AGE_MIN` (90), `SPX_ESTIMATE_DRIFT_WARN_PTS` (2), `INPUT_POLL_S` (5), `PLAN_AUTOGEN` (false) |
+| v2 alerts and risk | `MAX_STOPS_PER_DAY` (2), `ALERT_TTL_MIN` (10), `ALERT_MAX_DISTANCE_PTS` (10), `ALERT_REMIND_MIN` (5), `DISCORD_MENTION_USER_ID` |
+| v2 feed and decide | `SPY_DIVIDEND_DATE`, `SPY_DIVIDEND_USD`, `ANALYSES_DIR` (analyses), `TRADING_RULES_PATH` (CLAUDE.md) |
 | v1, slated for removal | `POLYGON_*`, `FINNHUB_*`, `YIELD_WINDOW_MIN`, `YIELD_EPSILON` |
 
 ## 16. Testing

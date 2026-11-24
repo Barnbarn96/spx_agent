@@ -112,6 +112,11 @@ MOOMOO_HOST = os.environ.get("MOOMOO_HOST", "127.0.0.1")
 MOOMOO_PORT = int(os.environ.get("MOOMOO_PORT", "11111"))
 MOOMOO_SPY_CODE = os.environ.get("MOOMOO_SPY_CODE", "US.SPY")
 MOOMOO_SPY_SPX_RATIO = float(os.environ.get("MOOMOO_SPY_SPX_RATIO", "10.06"))
+# v2: SPY ex-dividend day. On SPY_DIVIDEND_DATE (YYYY-MM-DD, ET) the dividend
+# in dollars is taken off SPY's previous close before the ratio is computed.
+# Ignored on any other day. `main.py --spy-dividend 1.85` sets it for today.
+SPY_DIVIDEND_DATE = os.environ.get("SPY_DIVIDEND_DATE", "").strip()
+SPY_DIVIDEND_USD = float(os.environ.get("SPY_DIVIDEND_USD", "0") or 0)
 
 FEED_RECONNECT_MIN_S = 1
 FEED_RECONNECT_MAX_S = 60

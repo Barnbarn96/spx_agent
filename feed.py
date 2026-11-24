@@ -26,6 +26,7 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import date as date_type
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -116,6 +117,11 @@ class PolygonFeed(TickSource):
                 continue
 
 
+def _in_opening_window(now_et: datetime) -> bool:
+    """09:30:00-09:34:59 ET: the opening prints, when SPY is at its noisiest."""
+    return (now_et.hour, now_et.minute) >= (9, 30) and (now_et.hour, now_et.minute) < (9, 35)
+
+
 def _parse_moomoo_ts(data_date: str, data_time: str) -> datetime:
     combined = f"{data_date} {data_time}"
     for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
@@ -161,6 +167,41 @@ class MoomooFeed(TickSource):
         # SPY prev close (from Moomoo's own quote rows).
         self._spx_prev_close: float | None = None
         self._spy_prev_close: float | None = None
+        # v2: no ratio changes 09:30-09:35 ET once calibrated; a change asked
+        # for in that window is held and applied at 09:35.
+        self._calibrated = False
+        self._deferred: tuple[float, str] | None = None
+        self._last_ts: datetime | None = None
+        self.ratio_note = ""
+        # v2: (ex-dividend date, dollars) for SPY ex-dividend days
+        self.spy_dividend: tuple[date_type, float] | None = None
+        if config.SPY_DIVIDEND_DATE and config.SPY_DIVIDEND_USD:
+            self.set_spy_dividend(date_type.fromisoformat(config.SPY_DIVIDEND_DATE), config.SPY_DIVIDEND_USD)
+
+    def set_spy_dividend(self, ex_date: date_type, usd: float) -> None:
+        """On ex_date only, SPY's previous close is reduced by usd before the
+        ratio is computed: SPY opens about one dividend lower while SPX
+        doesn't move. Assumes Moomoo's prev_close_price is the unadjusted
+        close (unverified, see V2_STATUS)."""
+        if not 0 < usd < 10:
+            raise ValueError(f"SPY dividend must be between 0 and 10 dollars, got {usd!r}")
+        self.spy_dividend = (ex_date, usd)
+        self._apply_prev_close_ratio()
+
+    def _now(self) -> datetime:
+        return self._last_ts or datetime.now(ET)
+
+    def _set_ratio(self, ratio: float, source: str) -> None:
+        now = self._now().astimezone(ET)
+        if self._calibrated and _in_opening_window(now):
+            self._deferred = (ratio, source)
+            self.ratio_note = f"new ratio {ratio:.4f} ({source}) held until 09:35 ET"
+            return
+        self.ratio = ratio
+        self.ratio_source = source
+        self._calibrated = True
+        self._deferred = None
+        self.ratio_note = ""
 
     def calibrate(self, spx_reference: float) -> None:
         """v1 fallback: recompute the SPY->SPX ratio against a live SPX
@@ -171,8 +212,10 @@ class MoomooFeed(TickSource):
         if self._spx_prev_close is not None:
             return
         if self._last_spy_price:
-            self.ratio = spx_reference / self._last_spy_price
-            self.ratio_source = f"spx_reference {spx_reference:g} / live SPY {self._last_spy_price:g}"
+            self._set_ratio(
+                spx_reference / self._last_spy_price,
+                f"spx_reference {spx_reference:g} / live SPY {self._last_spy_price:g}",
+            )
         else:
             self._pending_spx_reference = spx_reference
 
@@ -183,18 +226,22 @@ class MoomooFeed(TickSource):
         one arrives. Replans that keep the same spx_prev_close leave it
         unchanged.
 
-        Not handled automatically: SPY ex-dividend days, when SPY's prior
-        close drops by the dividend — the ratio is then off by roughly the
-        dividend (~0.2%). Recalibrate by hand on those days."""
+        SPY ex-dividend days: set the dividend (set_spy_dividend, or
+        SPY_DIVIDEND_DATE/SPY_DIVIDEND_USD, or main.py --spy-dividend) and it
+        is taken off SPY's previous close on that day."""
         self._spx_prev_close = spx_prev_close
         self._pending_spx_reference = None
         self._apply_prev_close_ratio()
 
     def _apply_prev_close_ratio(self) -> None:
         if self._spx_prev_close and self._spy_prev_close:
-            self.ratio = self._spx_prev_close / self._spy_prev_close
-            self.ratio_source = (
-                f"prev closes: SPX {self._spx_prev_close:g} / SPY {self._spy_prev_close:g}"
+            spy_prev, note = self._spy_prev_close, ""
+            if self.spy_dividend is not None and self.spy_dividend[0] == self._now().astimezone(ET).date():
+                spy_prev -= self.spy_dividend[1]
+                note = f" (ex-div -{self.spy_dividend[1]:g})"
+            self._set_ratio(
+                self._spx_prev_close / spy_prev,
+                f"prev closes: SPX {self._spx_prev_close:g} / SPY {self._spy_prev_close:g}{note}",
             )
 
     def _to_tick(self, row) -> Tick | None:
@@ -205,6 +252,9 @@ class MoomooFeed(TickSource):
         if spy_price <= 0:
             return None
         ts = _parse_moomoo_ts(str(row.get("data_date", "")), str(row.get("data_time", "")))
+        self._last_ts = ts
+        if self._deferred is not None and not _in_opening_window(ts.astimezone(ET)):
+            self._set_ratio(*self._deferred)
 
         self._last_spy_price = spy_price
         try:
@@ -215,8 +265,10 @@ class MoomooFeed(TickSource):
             self._spy_prev_close = prev_close
             self._apply_prev_close_ratio()
         if self._pending_spx_reference is not None and self._spx_prev_close is None:
-            self.ratio = self._pending_spx_reference / spy_price
-            self.ratio_source = f"spx_reference {self._pending_spx_reference:g} / live SPY {spy_price:g}"
+            self._set_ratio(
+                self._pending_spx_reference / spy_price,
+                f"spx_reference {self._pending_spx_reference:g} / live SPY {spy_price:g}",
+            )
             self._pending_spx_reference = None
 
         # yield_10y is always None — Futu/moomoo's OpenAPI covers equities/

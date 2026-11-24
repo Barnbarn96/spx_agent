@@ -56,6 +56,13 @@ ET = ZoneInfo("America/New_York")
 SGT = ZoneInfo("Asia/Singapore")
 
 
+def apply_spy_dividend_arg(feed: MoomooFeed, usd: float | None, today) -> None:
+    """main.py --spy-dividend: the dividend applies to today's ET date only."""
+    if usd is not None:
+        feed.set_spy_dividend(today, usd)
+        print(f"[main] SPY ex-dividend today: {usd:g} off SPY's previous close", file=sys.stderr)
+
+
 class Orchestrator:
     def __init__(self, sim: bool) -> None:
         self.sim = sim
@@ -88,6 +95,8 @@ class Orchestrator:
         self._saved_engine_json: str | None = None
         # Discord messages produced before the notifier was ready (e.g. at restore)
         self._pending_notices: list[str] = []
+        # main.py --spy-dividend (dollars), applied to the Moomoo feed in run_live()
+        self.spy_dividend: float | None = None
 
     # -- engine state persistence (v2) --------------------------------------
 
@@ -466,6 +475,8 @@ class Orchestrator:
             notes.append(self.gex.summary(tick.price, now))
         if isinstance(self._feed_source, MoomooFeed):
             notes.append(f"SPX is estimated from SPY (ratio {self._feed_source.ratio:.4f}, {self._feed_source.ratio_source})")
+            if self._feed_source.ratio_note:
+                notes.append(self._feed_source.ratio_note)
         if self.plan is not None and self.plan.notes:
             notes.append(f"Plan notes: {self.plan.notes}")
         return " | ".join(notes)
@@ -661,6 +672,7 @@ class Orchestrator:
 
         if config.FEED_SOURCE == "moomoo":
             source = MoomooFeed()
+            apply_spy_dividend_arg(source, self.spy_dividend, today=datetime.now(ET).date())
         elif config.FEED_SOURCE == "polygon":
             source = PolygonFeed()
         else:
@@ -754,6 +766,7 @@ class Orchestrator:
 
 async def _amain(args: argparse.Namespace) -> int:
     orchestrator = Orchestrator(sim=args.sim)
+    orchestrator.spy_dividend = args.spy_dividend
     await orchestrator.journal.connect()
 
     # Start the notifier before any plan loads — in live mode a plan may
@@ -797,6 +810,14 @@ def _build_cli() -> argparse.ArgumentParser:
         "--sim",
         action="store_true",
         help="Replay ticks from a CSV instead of the live Polygon websocket",
+    )
+    parser.add_argument(
+        "--spy-dividend",
+        type=float,
+        default=None,
+        metavar="USD",
+        help="Today is a SPY ex-dividend day: take this many dollars off SPY's previous close "
+        "when estimating SPX (overrides SPY_DIVIDEND_DATE/USD for today)",
     )
     parser.add_argument("--plan", type=Path, help="[--sim] Plan JSON to load (required with --sim)")
     parser.add_argument("--ticks", type=Path, help="[--sim] Ticks CSV, ts_et,price,yield_10y (required with --sim)")

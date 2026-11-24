@@ -9,7 +9,7 @@
 | Last updated | 2026-11-24 |
 | Branch | `release-v2` (from `release-v1` @ `f867349`) |
 | Commits so far | `fd68343` milestone 1 → `6d2d208` engine fixes → `16f1219` trigger types → two stops ends the day |
-| Tests | **221 passing**: `.venv/Scripts/python.exe -m pytest -q` |
+| Tests | **233 passing**: `.venv/Scripts/python.exe -m pytest -q` |
 | Live verification of v2 | **None yet.** Everything is unit-tested and replay-tested only. |
 
 **When you finish a task:**
@@ -32,10 +32,7 @@ Ground rules for every task:
 
 ### 1a. Ready to build now
 
-**1. Feed polish** (`feed.py`)
-- Don't recalibrate between 9:30 and 9:35 ET.
-- SPY ex-dividend days: allow a manual `--spy-dividend` / env override that's added back to SPY's previous close for that day.
-- Optional, with the operator's OK: recalibrate from a fresh GEX screenshot's `spx_in_shot` when drift is above 2 points.
+Nothing left in 1a. Optional, only with the operator's OK: recalibrate the SPY→SPX ratio from a fresh GEX screenshot's `spx_in_shot` when the drift warning fires (above 2 points).
 
 ### 1b. Parked
 1. **Cleanup of unneeded v1 code** (list in §2.1). The operator said on 11-24 to leave the v1 code alone for now and come back to it later. Don't delete anything until they say so.
@@ -78,6 +75,8 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 | 11-24 | **Stops default to any tick; `stop_confirm: close` is opt-in.** | The fastest exit is the safe default for 0DTE. |
 | 11-24 | **Alert age is measured from the Discord send time (wall clock), not the tick time; an expired alert goes to SKIPPED, not EXPIRED.** Untapped alerts expire by time only. | A `--sim` replay of a past date would otherwise expire on arrival. `EXPIRED` already means a trigger's window closed before it fired. Price can come back to an untapped alert, so distance is checked on the tap. |
 | 11-24 | **TRIGGER FIRED and ALERT EXPIRED also @mention**, beyond the original list (stops, invalidation, STOP MOVED, HALT, feed stale). Target hits don't. The reminder goes at 5 min, half the 10-min expiry. | The alert that needs a tap is the most urgent one; a target hit is informational once the plan is set. |
+| 11-24 | **The SPY dividend is subtracted from SPY's previous close, not added back** (the original task said "added back"). | SPY opens a dividend lower while SPX doesn't; the ratio must use the ex-dividend basis. Adding it back would make the estimate worse either way. Whether Moomoo already adjusts `prev_close_price` is unverified (§5). |
+| 11-24 | **The opening freeze never holds back the day's first calibration.** | The initial guess ratio is worse than a noisy one. |
 | 11-24 | **Breakeven uses the fire price as the entry.** It only ever tightens. | — |
 | 11-24 | **No fill price on EXECUTE (task dropped).** Mark Filled stays as the one-tap "I'm in" that starts stop/target tracking. | The operator trades off SPX key levels, not the option premium. |
 | 11-24 | **The soft wait is decided at tap time, and triggers alert inside it.** `/premarket` sets triggers' `not_before` to 09:30 and puts the wait in `no_entries_before`. A tap after the wait is a regular entry even if the alert came earlier; the fire-time tag is kept only for skips. | The journal should record when the operator actually entered. Seeing alerts inside the wait is what lets the operator judge early setups. |
@@ -91,6 +90,11 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 ---
 
 ## 4. Done
+
+**Feed polish (11-24)**
+- `MoomooFeed._set_ratio()`: no ratio change 09:30-09:35 ET once calibrated; held changes apply at 09:35 and show in `ratio_note` (and `decide()`'s notes).
+- SPY ex-dividend: `set_spy_dividend()`, `SPY_DIVIDEND_DATE` / `SPY_DIVIDEND_USD`, `main.py --spy-dividend <USD>` (today only). Subtracted from SPY's previous close on that date.
+- Tests: `tests/test_v2_feed_polish.py` (12). Mutation checks: freeze off fails 2, dividend off fails 1.
 
 **`decide()` gets the real context (11-24)**
 - `decide_context.py`: `analysis_excerpt()` / `load_analysis()`, `load_trading_rules()`, `format_closes()`. `TriggerEngine.recent_closes()`.
@@ -175,6 +179,7 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 - **Close-confirmed stops have no hard backstop.** A violent move only exits at the next bar close. Consider a "tick stop at stop ± N pts" safety net.
 - **A "stall"/rejection pattern can't be expressed.** Plans say "confirm by eye" in `notes`.
 - **Whether `prev_close_price` is present in Moomoo extended-hours push rows is unverified** (§7). If it isn't, calibration falls back silently except for a log line.
+- **SPY ex-dividend: is Moomoo's `prev_close_price` the actual or the adjusted close?** Unverified. On the next ex-date (SPY's are quarterly, around the third Friday of Mar/Jun/Sep/Dec), run without `--spy-dividend` and compare the estimate with a GEX screenshot's `.SPX`. Off by about 10× the dividend → use `--spy-dividend`. Close → Moomoo adjusts; don't use it.
 - **`main.py --sim` calls the real `decide()`,** which uses the SDK and the subscription. For offline checks use `replay.py`, which stubs `decide`.
 
 ---
@@ -198,6 +203,7 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 - [ ] Alert expiry: leave an alert untapped for 10+ minutes and the "ALERT EXPIRED" notice appears; tapping EXECUTE on it then says Ignored (SKIPPED).
 - [ ] @mentions: with `DISCORD_MENTION_USER_ID` set, a TRIGGER FIRED alert pings your phone, and an untapped one gets one REMINDER at 5 min.
 - [ ] `tools/try_decide.py` returns a decision whose reasoning names a level from the write-up or one of the closes (try the default, then `--trigger breakout_long --price 7262 --closes 7240,7248,7255,7258,7261,7263`).
+- [ ] Opening freeze: on a morning when `main.py` runs through 09:30-09:35, the ratio in the log doesn't change in that window.
 - [ ] Two stops in one day: the 2nd posts the HALT notice and `state/HALT` exists; EXECUTE on a later alert is refused. Delete `state/HALT` by hand to resume.
 - [ ] From v1, still unverified: continuous RTH ticks, reconnect with backoff, the dead-man rule (`docs/v1/ROLLOUT_PLAN.md` Step 4).
 
