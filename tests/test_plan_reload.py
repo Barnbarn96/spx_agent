@@ -23,7 +23,10 @@ def drive_to_open(engine, trigger_id: str, price: float) -> None:
     """Walk a trigger through the real state machine to OPEN, the way a
     live session would: a tick inside the zone fires it, the operator taps
     EXECUTE, then marks it filled. confirm()/mark_filled() are no-ops from
-    the wrong state, so the fire step is not optional."""
+    the wrong state, so the fire step is not optional. Starts below every
+    test zone (and above the invalidation), since v2 never fires on the
+    first sight of a zone."""
+    engine.evaluate(Tick(ts=_dt.datetime(2026, 7, 29, 9, 59, tzinfo=ET), price=95.0))
     engine.evaluate(Tick(ts=_dt.datetime(2026, 7, 29, 10, 0, tzinfo=ET), price=price))
     assert engine.states[trigger_id].status == TriggerStatus.FIRED
     engine.confirm(trigger_id)

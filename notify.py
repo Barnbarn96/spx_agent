@@ -247,6 +247,18 @@ class Notifier:
         action, _, trigger_id = custom_id.partition(":")
         original = interaction.message.content if interaction.message else ""
 
+        # v2: a button can outlive its trigger's FIRED state (a replan, a
+        # restart that re-armed it). confirm/skip/mark_filled would silently
+        # no-op, so say so instead of claiming success.
+        expected = {"confirm": "FIRED", "skip": "FIRED", "filled": "CONFIRMED"}.get(action)
+        state = self.engine.states.get(trigger_id)
+        if expected is not None and (state is None or state.status.value != expected):
+            now = "removed" if state is None else state.status.value
+            await interaction.response.edit_message(
+                content=original + f"\n\n>> Ignored: `{trigger_id}` is no longer awaiting this ({now})"
+            )
+            return
+
         if action == "confirm":
             if self.risk is not None:
                 gate = self.risk.gate_execute(self.engine, datetime.now(ET))

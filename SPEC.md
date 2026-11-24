@@ -126,10 +126,12 @@ See `python tools/write_plan.py --schema`, and `--example` for a worked plan bui
 
 Pure and synchronous. Ticks in, events out. Per-trigger state machine: `ARMED → FIRED → (CONFIRMED → OPEN → CLOSED) | SKIPPED | EXPIRED`.
 
-Events: `TriggerFired`, `TargetHit`, `StopHit`, `Invalidated`, `FlatByReached`, `ReviewRequired`, `EngineWarning`.
+Events: `TriggerFired`, `TargetHit`, `StopHit`, `Invalidated`, `FlatByReached`, `ReviewRequired`, **`AlreadyInZone`**, **`ZoneSkipped`**, `EngineWarning`.
 
 **Current rules:**
-- **Entry zone:** fires on a tick inside the zone when the previous tick was outside it, or when there was no previous tick.
+- **Entry zone:** fires on a tick inside the zone when the previous tick that reached the price check was outside it, or when a time or yield gate has just opened.
+- **First sight (v2):** the first time the engine evaluates a trigger (at startup, on a new plan, or when a replan adds it), price already inside the zone does **not** fire. It emits `AlreadyInZone` once, and the trigger fires only after price leaves and re-enters. "First sight" is recorded before any gate, so a trigger first seen at 9:50 with `not_before` 10:00 still fires at 10:00 if price is in the zone then.
+- **Zone skipped (v2):** if price moves from one side of a `price_between` zone to the other between two ticks without trading inside it, the trigger **does not fire**. Price is then outside the planned entry zone, and firing would mean chasing, as with the 2026-07-01 ISM spike 7464→7480 through the 7465-7472 dip zone. It emits `ZoneSkipped`, and a later move back into the zone fires normally. Jumps while a gate is closed are silent.
 - **Stops, targets and invalidation:** checked as crossings between consecutive ticks, so a gap through a level still emits the event.
 - **Yield conditions:** level conditions use the tick's `yield_10y`. `main.py` only attaches a fresh manual yield, so `None` means missing and the condition fails closed with one `EngineWarning` per lapse.
 - **Requirements:** `requires_not_filled` blocks firing while a referenced trigger is FIRED, CONFIRMED or OPEN. `not_after` expires the trigger, and WAIT re-arms it with a 5-minute cooldown.
@@ -139,18 +141,24 @@ Events: `TriggerFired`, `TargetHit`, `StopHit`, `Invalidated`, `FlatByReached`, 
   - An OPEN trigger the new plan drops emits `ReviewRequired`.
   - It clears an invalidation and returns True, and `main.py` alerts on that.
 
-**[planned] fixes (see V2_STATUS):**
+- **Persistence (v2):** `to_snapshot()` / `restore_snapshot()` save and restore per-trigger status, debounce and first-sight flags, targets hit, cooldowns, and the invalidation and flat-by flags. A snapshot from another plan date is ignored. An in-flight trigger missing from the current plan is restored from its saved definition.
+
+**[planned] (see V2_STATUS):**
 - confirmation modes instead of single-tick triggering
-- a move through a whole zone between ticks counts as entering it
-- no fire on the first tick when it's already inside a zone
 - direction of approach
+- first-touch fades
 - breakeven stop after TP1
 
 ## 7. Watcher (`main.py`)
 
 - **Startup:** load `state/plan_<today>.json` if it exists, start the scheduler, the feed and the **input poller** task.
+- **Engine state persistence:**
+  - After every tick, every poll and at shutdown, `main.py` writes `state/engine_<date>.json` if the snapshot changed. Polling catches Discord taps.
+  - On the first plan load of a process it restores that file.
+  - Restored **FIRED** triggers are re-armed, with a fresh entry required, because their alert may never have gone out. A Discord notice says so.
+  - Not used in `--sim`.
 - **Input poller (every 5 s):**
-  - reload the plan if the file changed. A first plan of the day gets a Discord summary; a replan gets a diff.
+  - reload the plan if the file **contents** changed. It compares contents, not modification time, because two writes inside the filesystem's timestamp resolution share an mtime. A first plan of the day gets a Discord summary; a replan gets a diff.
   - reload `yield.json` and `gex.json`.
   - check the SPX estimate against the screenshot price (when a GEX screenshot is ≤ 3 min old and differs by more than `SPX_ESTIMATE_DRIFT_WARN_PTS`, default 2, post a Discord warning).
   - during RTH, if an ARMED trigger has a yield condition and the yield is missing or expired, post **one yield reminder per lapse**.
@@ -165,7 +173,8 @@ Events: `TriggerFired`, `TargetHit`, `StopHit`, `Invalidated`, `FlatByReached`, 
   - the plan notes
 
   WAIT re-arms the trigger; otherwise Discord gets an alert with EXECUTE/SKIP.
-- **[planned]:** run `decide()` as a background task (today it blocks the tick loop for up to 30 s). Persist engine state to disk and restore it on restart.
+- **`decide()` runs as a background task (v2),** so stops and targets on other trades keep being checked during its up-to-30 s call. When it returns, the alert is sent only if the trigger is still FIRED; a replan may have dropped or reset it. `wait_for_decisions()` drains pending calls (end of `--sim`, tests). Shutdown cancels them.
+- **`AlreadyInZone` and `ZoneSkipped`** each post a short Discord notice.
 - `PLAN_AUTOGEN=false` (the default) disables v1's 08:00 auto-plan.
 
 ## 8. Feed (`feed.py`)
@@ -247,6 +256,8 @@ Pipeline: the analysis is shown in chat and saved to `analyses/<date>.md`, Claud
 Gateway bot, no inbound ports. Alerts include price, ET and SGT time, the trigger id and the agent's reasoning.
 
 Buttons: EXECUTE (re-checks risk), SKIP, Mark Filled. Stop and target tracking starts only after Mark Filled.
+
+**Stale buttons (v2):** a tap whose trigger is no longer in the expected state (EXECUTE/SKIP need FIRED, Mark Filled needs CONFIRMED) is answered with "Ignored: … no longer awaiting this (STATUS)". It no longer falsely reports success. This happens after a replan or a restart that re-armed the trigger.
 
 **[planned]:**
 - EXECUTE asks for the fill price and opens the trade, replacing Mark Filled.

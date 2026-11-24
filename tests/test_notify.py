@@ -74,6 +74,8 @@ def mk_engine() -> TriggerEngine:
     engine = TriggerEngine(plan)
     from schema import Tick
 
+    # start outside the zone (v2: no fire on first sight), then enter it
+    engine.evaluate(Tick(ts=_dt.datetime(2026, 7, 29, 9, 59, tzinfo=ET), price=95.0))
     engine.evaluate(Tick(ts=_dt.datetime(2026, 7, 29, 10, 0, tzinfo=ET), price=105.0))
     return engine
 
@@ -111,3 +113,22 @@ async def test_confirm_allowed_by_risk_confirms() -> None:
 
     assert engine.states["primary_long"].status == TriggerStatus.CONFIRMED
     assert "EXECUTE confirmed by operator" in interaction.response.edited_content
+
+
+async def test_stale_button_is_ignored_not_falsely_confirmed() -> None:
+    """v2: a button can outlive its trigger's FIRED state (replan, restart
+    re-arm). Tapping it must say so rather than claim success."""
+    engine = mk_engine()
+    engine.skip("primary_long")  # no longer awaiting a decision
+    risk = FakeRisk(allowed=True)
+    notifier = Notifier("token", 123, engine=engine, journal=None, risk=risk)
+
+    interaction = FakeInteraction("confirm:primary_long")
+    await notifier._on_interaction(interaction)
+
+    from triggers import TriggerStatus
+
+    assert "Ignored" in interaction.response.edited_content
+    assert "SKIPPED" in interaction.response.edited_content
+    assert risk.calls == 0
+    assert engine.states["primary_long"].status == TriggerStatus.SKIPPED

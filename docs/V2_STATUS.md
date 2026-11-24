@@ -2,9 +2,9 @@
 
 **Read this first if you are picking up `release-v2`.** It records where the build stopped, what's decided, what's still open, and what to do next, in order. [SPEC.md](../SPEC.md) is the contract. This file is the to-do list and the decision log.
 
-- **Last updated:** 2026-11-24 (end of milestone 1)
-- **Branch:** `release-v2`, cut from `release-v1` at `f867349`. Check `git log` and `git status`: milestone 1 may still be uncommitted.
-- **Tests:** 90 passing (`.venv/Scripts/python.exe -m pytest -q`).
+- **Last updated:** 2026-11-24 (milestone 1 committed as `fd68343`; engine fixes A1, A2, A7, A8 done after it, check `git status` / `git log`)
+- **Branch:** `release-v2`, cut from `release-v1` at `f867349`.
+- **Tests:** 106 passing (`.venv/Scripts/python.exe -m pytest -q`).
 - **Live verification of v2: none yet.** Everything below "done" is unit-tested only.
 
 Keep this file current: tick items off, add decisions with dates, and move anything finished into "Done".
@@ -25,6 +25,9 @@ Keep this file current: tick items off, add decisions with dates, and move anyth
 | 11-24 | **The repo copy of the skills is the master.** | They're versioned with the code that reads their output. |
 | 11-24 | **The operator always uses `/intraday`, not the bare skill,** for data or GEX screenshots. | Only the command records inputs for `main.py` and offers a replan. |
 | 11-24 | **v1 SPEC and ROLLOUT_PLAN archived** to `docs/v1/`. A new v2 `SPEC.md` was written. | — |
+| 11-24 | **A jump straight through an entry zone alerts (`ZoneSkipped`) but does NOT fire.** | The first version fired. The 07-01 ISM replay showed it chasing the 7464→7480 spike through a 7465-7472 dip zone instead of waiting for the 7468 pullback. Firing outside the planned zone also breaks "models never originate numbers". |
+| 11-24 | **Price already in a zone at first sight (startup, new plan, replan) does not fire (`AlreadyInZone`).** A gate opening with price in the zone still fires. | Don't enter a setup that may be half over. A not_before or yield gate opening is a real "conditions now met". |
+| 11-24 | **On restart, restored FIRED triggers are re-armed** (a fresh entry is needed), and Discord is told. | Their alert may never have been sent, and the old buttons no longer apply. |
 
 ## 2. Done (milestone 1)
 
@@ -65,6 +68,16 @@ Keep this file current: tick items off, add decisions with dates, and move anyth
 - README v2 quick start
 - `.env.example`, `.gitignore`
 
+### Engine fixes (after milestone 1)
+- **A1 zone skipped:** `ZoneSkipped` event, no fire, Discord notice. Regression test for the 07-01 replay.
+- **A2 first sight:** `TriggerState.observed`, `AlreadyInZone` event, Discord notice. v1 tests that assumed "first tick in zone fires" now start outside the zone.
+- **A7 `decide()` in the background:** `Orchestrator._spawn_decide` / `wait_for_decisions`. No alert if the trigger is no longer FIRED when `decide()` returns.
+- **A8 persistence:** `TriggerEngine.to_snapshot` / `restore_snapshot`, `state/engine_<date>.json`, saved after ticks and polls and at shutdown. Restored on first plan load, with FIRED re-armed.
+- **Fixed along the way:**
+  - Plan reload now compares file **contents**, not mtime. The mtime check intermittently missed a replan written inside the timestamp resolution (seen as a flaky test on Windows).
+  - Discord buttons for a trigger no longer in the expected state reply "Ignored …" instead of falsely saying "confirmed".
+- Tests: `tests/test_v2_engine.py` (16), plus one in `test_notify.py`.
+
 ## 3. Open decisions, waiting on the operator
 
 1. **Cleanup of unneeded v1 code.** Proposed, not yet approved. Don't delete until the operator says so.
@@ -83,14 +96,14 @@ Keep this file current: tick items off, add decisions with dates, and move anyth
 Each item lists what "done" means. Write tests first for engine changes (replay-style, through the real `TriggerEngine`).
 
 ### A. Engine correctness (highest priority, affects real money)
-1. **Fast move through a whole zone.** Treat the previous tick on one side and the current tick on the other side of `price_between` as entering it. *Done when:* a 7,220→7,190 jump fires `buy_dip [7195, 7215]`.
-2. **No fire on startup inside a zone.** The first tick after start or (re)arm only records `was_in_zone`, unless the plan opts in. *Done when:* starting with price inside a zone doesn't fire until price leaves and re-enters.
+1. ~~**Fast move through a whole zone.** (Built as alert-only `ZoneSkipped`, not a fire; see the decision log.) Treat the previous tick on one side and the current tick on the other side of `price_between` as entering it. *Done when:* a 7,220→7,190 jump fires `buy_dip [7195, 7215]`.~~ **Done 11-24** (see §2).
+2. ~~**No fire on startup inside a zone.** The first tick after start or (re)arm only records `was_in_zone`, unless the plan opts in. *Done when:* starting with price inside a zone doesn't fire until price leaves and re-enters.~~ **Done 11-24** (see §2).
 3. **Confirmation modes.** `Condition.confirm {type: tick | close | dwell, timeframe, seconds}`. Needs a bar builder (1m/5m) in the engine or `main.py`. Stops get their own optional confirmation (default stricter than one tick, configurable). *Done when:* "5-min close above 7,260" is expressible, and a single-tick wick doesn't fire it.
 4. **Direction of approach.** `approach: from_above | from_below`.
 5. **First-touch / stall fade.** `first_touch: true` fires only on the first touch of the session.
 6. **Take half at TP1 → breakeven stop.** `Target.then_stop: "breakeven"` moves the trigger's stop to the entry price after that target. Needs a recorded entry price (see C1).
-7. **`decide()` off the tick loop.** Run it as an `asyncio` task in `main.py`. *Done when:* a 30 s `decide()` doesn't delay stop evaluation on another OPEN trigger (test with a slow fake `decide`).
-8. **Save engine state** (trigger statuses, targets hit, entry and fill prices) to `state/engine_<date>.json` on every change, and restore it on startup. *Done when:* restarting `main.py` mid-trade keeps the trade OPEN with its stop.
+7. ~~**`decide()` off the tick loop.** Run it as an `asyncio` task in `main.py`. *Done when:* a 30 s `decide()` doesn't delay stop evaluation on another OPEN trigger (test with a slow fake `decide`).~~ **Done 11-24** (see §2).
+8. ~~**Save engine state** (trigger statuses, targets hit, entry and fill prices) to `state/engine_<date>.json` on every change, and restore it on startup. *Done when:* restarting `main.py` mid-trade keeps the trade OPEN with its stop.~~ **Done 11-24** (see §2).
 
 ### B. Risk rules (`risk.py`, at the EXECUTE tap)
 1. **Two stops ends the day:** count `StopHit` per day and create HALT on the 2nd.

@@ -5,6 +5,7 @@ import pytest
 
 from schema import (
     Action,
+    AlreadyInZone,
     Condition,
     EngineWarning,
     FlatByReached,
@@ -101,11 +102,17 @@ def test_fires_on_transition_into_zone_not_while_staying_inside():
     assert events_of(e3, TriggerFired) == []
 
 
-def test_fires_on_first_tick_ever_if_already_inside_zone():
+def test_already_inside_zone_on_first_tick_does_not_fire_until_fresh_entry():
+    """v2: starting (or loading a plan) with price already inside a zone
+    reports AlreadyInZone instead of firing on a setup that may be half over."""
     plan = mk_plan([mk_trigger("t1")])
     engine = TriggerEngine(plan)
     e1 = engine.evaluate(tick(105.0, ts(9, 30)))
-    assert len(events_of(e1, TriggerFired)) == 1
+    assert events_of(e1, TriggerFired) == []
+    assert [e.trigger_id for e in events_of(e1, AlreadyInZone)] == ["t1"]
+    assert events_of(engine.evaluate(tick(106.0, ts(9, 31))), TriggerFired) == []
+    engine.evaluate(tick(95.0, ts(9, 32)))  # leaves
+    assert len(events_of(engine.evaluate(tick(104.0, ts(9, 33))), TriggerFired)) == 1
 
 
 # -- one-shot --------------------------------------------------------------
@@ -114,6 +121,7 @@ def test_fires_on_first_tick_ever_if_already_inside_zone():
 def test_one_shot_never_refires_after_resolution():
     plan = mk_plan([mk_trigger("t1")])
     engine = TriggerEngine(plan)
+    engine.evaluate(tick(95.0, ts(9, 29)))  # start outside the zone (v2: no fire on first sight)
 
     engine.evaluate(tick(105.0, ts(9, 30)))
     assert engine.states["t1"].status == TriggerStatus.FIRED
@@ -134,6 +142,7 @@ def test_requires_not_filled_blocks_while_referenced_trigger_active():
     a = mk_trigger("a", price_between=(100.0, 110.0))
     b = mk_trigger("b", price_between=(100.0, 110.0), requires_not_filled=["a"])
     engine = TriggerEngine(mk_plan([a, b]))
+    engine.evaluate(tick(95.0, ts(9, 29)))  # start outside the zone (v2: no fire on first sight)
 
     events = engine.evaluate(tick(105.0, ts(9, 30)))
     fired_ids = {e.trigger_id for e in events_of(events, TriggerFired)}
@@ -145,6 +154,7 @@ def test_requires_not_filled_unblocks_once_referenced_trigger_resolved():
     a = mk_trigger("a", price_between=(100.0, 110.0))
     b = mk_trigger("b", price_between=(100.0, 110.0), requires_not_filled=["a"])
     engine = TriggerEngine(mk_plan([a, b]))
+    engine.evaluate(tick(95.0, ts(9, 29)))  # start outside the zone (v2: no fire on first sight)
 
     engine.evaluate(tick(105.0, ts(9, 30)))
     engine.skip("a")
@@ -184,6 +194,7 @@ def test_yield_condition_fires_once_direction_confirmed():
 def test_gap_through_stop_hit_emitted_even_without_printing_at_stop():
     trig = mk_trigger("t1", stop=90.0)
     engine = TriggerEngine(mk_plan([trig]))
+    engine.evaluate(tick(95.0, ts(9, 29)))  # start outside the zone (v2: no fire on first sight)
 
     engine.evaluate(tick(105.0, ts(9, 30)))  # fires
     engine.confirm("t1")
@@ -205,6 +216,7 @@ def test_invalidation_blocks_subsequent_trigger_fires():
     a = mk_trigger("a", price_between=(100.0, 110.0))
     b = mk_trigger("b", price_between=(50.0, 60.0), stop=40.0)
     engine = TriggerEngine(mk_plan([a, b], below=80.0))
+    engine.evaluate(tick(95.0, ts(9, 29)))  # start outside the zone (v2: no fire on first sight)
 
     e1 = engine.evaluate(tick(105.0, ts(9, 30)))
     assert len(events_of(e1, TriggerFired)) == 1  # a fires
@@ -228,7 +240,8 @@ def test_load_plan_clears_invalidation_and_reports_it():
     assert cleared is True, "load_plan must report that it superseded an invalidation"
     assert engine.invalidated is False
 
-    e = engine.evaluate(tick(55.0, ts(9, 32)))  # enters b's zone
+    engine.evaluate(tick(65.0, ts(9, 32)))  # b first seen outside its zone
+    e = engine.evaluate(tick(55.0, ts(9, 33)))  # enters b's zone
     assert len(events_of(e, TriggerFired)) == 1, "new plan's triggers must be able to fire post-clear"
 
 
@@ -247,6 +260,7 @@ def test_hot_swap_preserves_open_and_emits_review_required_on_removal():
     a = mk_trigger("a", price_between=(100.0, 110.0), stop=90.0)
     c = mk_trigger("c", price_between=(200.0, 210.0))
     engine = TriggerEngine(mk_plan([a, c]))
+    engine.evaluate(tick(95.0, ts(9, 29)))  # start outside the zone (v2: no fire on first sight)
 
     engine.evaluate(tick(105.0, ts(9, 30)))
     engine.confirm("a")
@@ -295,6 +309,7 @@ def test_trigger_expires_after_not_after_and_never_fires():
 def test_wait_rearms_with_cooldown_then_refires():
     trig = mk_trigger("t1")
     engine = TriggerEngine(mk_plan([trig]))
+    engine.evaluate(tick(95.0, ts(9, 29)))  # start outside the zone (v2: no fire on first sight)
 
     t0 = ts(9, 30)
     e1 = engine.evaluate(tick(105.0, t0))
@@ -317,6 +332,7 @@ def test_gap_through_multiple_targets_close_trigger():
     targets = [Target(level=120.0, scale_out_pct=50), Target(level=130.0, scale_out_pct=50)]
     trig = mk_trigger("t1", targets=targets)
     engine = TriggerEngine(mk_plan([trig]))
+    engine.evaluate(tick(95.0, ts(9, 29)))  # start outside the zone (v2: no fire on first sight)
 
     engine.evaluate(tick(105.0, ts(9, 30)))
     engine.confirm("t1")
@@ -331,6 +347,7 @@ def test_gap_through_multiple_targets_close_trigger():
 def test_flat_by_reached_emitted_once_for_open_position():
     trig = mk_trigger("t1")
     engine = TriggerEngine(mk_plan([trig], flat_by="10:00"))
+    engine.evaluate(tick(95.0, ts(9, 29)))  # start outside the zone (v2: no fire on first sight)
 
     engine.evaluate(tick(105.0, ts(9, 30)))
     engine.confirm("t1")

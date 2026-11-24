@@ -14,6 +14,7 @@ from enum import Enum
 from zoneinfo import ZoneInfo
 
 from schema import (
+    AlreadyInZone,
     EngineEvent,
     EngineWarning,
     FlatByReached,
@@ -25,6 +26,7 @@ from schema import (
     Tick,
     Trigger,
     TriggerFired,
+    ZoneSkipped,
 )
 
 ET = ZoneInfo("America/New_York")
@@ -65,10 +67,17 @@ def _hhmm_on_date(hhmm: str, ref_ts: datetime) -> datetime:
 class TriggerState:
     trigger: Trigger
     status: TriggerStatus = TriggerStatus.ARMED
-    was_in_zone: bool | None = None  # None = no tick seen yet since (re)arm
+    # Zone membership on the last tick that reached the price check. None =
+    # unknown (no such tick yet, a time/yield gate has been blocking, or a
+    # WAIT re-arm) — the next in-zone tick may fire.
+    was_in_zone: bool | None = None
     targets_hit: set[float] = field(default_factory=set)
     cooldown_until: datetime | None = None
     warned_no_yield: bool = False
+    # v2: False until the engine has evaluated this trigger once. The very
+    # first evaluation never fires on price already inside the zone (startup,
+    # new plan, replan) — it emits AlreadyInZone instead.
+    observed: bool = False
 
 
 class TriggerEngine:
@@ -164,6 +173,60 @@ class TriggerEngine:
         self.plan = new_plan
         self.states = new_states
         return was_invalidated
+
+    # -- persistence (v2) -------------------------------------------------
+
+    def to_snapshot(self) -> dict:
+        """Everything needed to resume after a restart: per-trigger status,
+        debounce/first-sight flags, targets hit, cooldowns, plus the
+        engine-wide invalidation and flat-by flags. JSON-serializable."""
+        return {
+            "plan_date": self.plan.date.isoformat(),
+            "invalidated": self.invalidated,
+            "flat_by_reached": self._flat_by_reached,
+            "states": {
+                tid: {
+                    "trigger": s.trigger.model_dump(mode="json"),
+                    "status": s.status.value,
+                    "was_in_zone": s.was_in_zone,
+                    "targets_hit": sorted(s.targets_hit),
+                    "cooldown_until": s.cooldown_until.isoformat() if s.cooldown_until else None,
+                    "warned_no_yield": s.warned_no_yield,
+                    "observed": s.observed,
+                }
+                for tid, s in self.states.items()
+            },
+        }
+
+    def restore_snapshot(self, snapshot: dict) -> list[str]:
+        """Re-apply a to_snapshot() taken earlier the same day. Triggers in
+        the current plan take the saved status/flags; a saved trigger that
+        is in flight (FIRED/CONFIRMED/OPEN) but missing from the plan is
+        kept, using its saved definition, so an open position never loses
+        its stop. Returns the ids restored. A snapshot for a different plan
+        date is ignored."""
+        if snapshot.get("plan_date") != self.plan.date.isoformat():
+            return []
+        self.invalidated = bool(snapshot.get("invalidated", False))
+        self._flat_by_reached = bool(snapshot.get("flat_by_reached", False))
+        restored = []
+        for tid, saved in snapshot.get("states", {}).items():
+            status = TriggerStatus(saved["status"])
+            state = self.states.get(tid)
+            if state is None:
+                if status not in _ACTIVE_STATUSES:
+                    continue
+                state = TriggerState(trigger=Trigger.model_validate(saved["trigger"]))
+                self.states[tid] = state
+            state.status = status
+            state.was_in_zone = saved.get("was_in_zone")
+            state.targets_hit = set(saved.get("targets_hit", []))
+            cooldown = saved.get("cooldown_until")
+            state.cooldown_until = datetime.fromisoformat(cooldown) if cooldown else None
+            state.warned_no_yield = bool(saved.get("warned_no_yield", False))
+            state.observed = bool(saved.get("observed", False))
+            restored.append(tid)
+        return restored
 
     # -- main evaluation loop -------------------------------------------
 
@@ -271,6 +334,12 @@ class TriggerEngine:
         cond = trigger.condition
         now_et = tick.ts.astimezone(ET)
 
+        # Recorded before any gate, so a trigger first seen while a
+        # not_before/yield gate blocks it can still fire when the gate opens
+        # with price inside the zone — that's a real "conditions now met".
+        first_observation = not state.observed
+        state.observed = True
+
         if cond.not_before is not None:
             if now_et < _hhmm_on_date(cond.not_before, tick.ts):
                 return False
@@ -331,12 +400,38 @@ class TriggerEngine:
             was_in_zone = state.was_in_zone
             state.was_in_zone = in_zone
             if not in_zone:
+                # v2: a fast move can carry price clean across a narrow
+                # price_between zone between two ticks. Don't fire — price
+                # is now outside the planned entry zone (firing would chase,
+                # e.g. a data spike up through a buy-the-dip zone) — but tell
+                # the operator. A later move back into the zone still fires,
+                # since was_in_zone is now False.
+                if not first_observation and self._jumped_through_zone(trigger, tick):
+                    events.append(
+                        ZoneSkipped(trigger_id=trigger.id, from_price=self.prev_tick.price, tick=tick)
+                    )
                 return False
-            if was_in_zone is not None and was_in_zone:
+            if was_in_zone:
                 # already inside on the previous tick -> debounced, no refire
+                return False
+            if first_observation:
+                # v2: price was already inside the zone the first time the
+                # engine saw this trigger. Don't fire on a setup that may
+                # be half over; wait for a fresh entry, but say so.
+                events.append(AlreadyInZone(trigger_id=trigger.id, tick=tick))
                 return False
 
         return True
+
+    def _jumped_through_zone(self, trigger: Trigger, tick: Tick) -> bool:
+        between = trigger.condition.price_between
+        prev = self.prev_tick
+        if between is None or prev is None:
+            return False
+        low, high = between
+        return (prev.price > high and tick.price < low) or (
+            prev.price < low and tick.price > high
+        )
 
     def _evaluate_armed(
         self, state: TriggerState, tick: Tick, events: list[EngineEvent]

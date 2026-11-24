@@ -290,6 +290,34 @@ class ReviewRequired(BaseModel):
     tick: Tick | None = None
 
 
+class AlreadyInZone(BaseModel):
+    """v2: the first time the engine sees a trigger (startup, a new plan, or
+    a replan adding it), price was already inside its zone. The trigger
+    does NOT fire — it waits for price to leave and re-enter — but the
+    operator is told, since the setup may already be in play."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["already_in_zone"] = "already_in_zone"
+    trigger_id: str
+    tick: Tick
+
+
+class ZoneSkipped(BaseModel):
+    """v2: price moved clean across a trigger's price_between zone between
+    two ticks without printing inside it. The trigger does NOT fire — the
+    current price is outside the planned entry zone, and firing there would
+    mean chasing (e.g. a data spike through a buy-the-dip zone) — but the
+    operator is told, and a later move back into the zone still fires."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["zone_skipped"] = "zone_skipped"
+    trigger_id: str
+    from_price: float
+    tick: Tick
+
+
 class EngineWarning(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -306,5 +334,7 @@ EngineEvent = Union[
     Invalidated,
     FlatByReached,
     ReviewRequired,
+    AlreadyInZone,
+    ZoneSkipped,
     EngineWarning,
 ]
