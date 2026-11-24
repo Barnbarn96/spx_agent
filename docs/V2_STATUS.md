@@ -202,7 +202,7 @@ Nothing else is open. The dollar cap, VIX source and P&L reporting were decided 
 - [ ] Early entry: with a plan whose `no_entries_before` is in the future, an alert shows "Early entry — override?"; tapping it opens the reason box; submitting confirms and the reason appears in the message.
 - [ ] Alert expiry: leave an alert untapped for 10+ minutes and the "ALERT EXPIRED" notice appears; tapping EXECUTE on it then says Ignored (SKIPPED).
 - [ ] @mentions: with `DISCORD_MENTION_USER_ID` set, a TRIGGER FIRED alert pings your phone, and an untapped one gets one REMINDER at 5 min.
-- [ ] `tools/try_decide.py` returns a decision whose reasoning names a level from the write-up or one of the closes (try the default, then `--trigger breakout_long --price 7262 --closes 7240,7248,7255,7258,7261,7263`).
+- [x] `tools/try_decide.py` returns a decision whose reasoning names a level from the write-up or one of the closes. **Passed 11-24** (operator's PC, `claude-opus-5`): default case gave WAIT 66, citing the 7236->7207 closes, the 7210 first support and the "enter on confirmation" rule (try the default, then `--trigger breakout_long --price 7262 --closes 7240,7248,7255,7258,7261,7263`).
 - [ ] Opening freeze: on a morning when `main.py` runs through 09:30-09:35, the ratio in the log doesn't change in that window.
 - [ ] Two stops in one day: the 2nd posts the HALT notice and `state/HALT` exists; EXECUTE on a later alert is refused. Delete `state/HALT` by hand to resume.
 - [ ] From v1, still unverified: continuous RTH ticks, reconnect with backoff, the dead-man rule (`docs/v1/ROLLOUT_PLAN.md` Step 4).
